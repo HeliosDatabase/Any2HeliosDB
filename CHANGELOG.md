@@ -3,7 +3,7 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.9.2] — 2026-06-24
 
 ### Fixed
 - **MySQL → PostgreSQL view-body translation** (reported via Sakila `staff_list`
@@ -27,8 +27,22 @@ All notable changes to Any2HeliosDB are documented here. This project adheres to
   translated too. Where MySQL combines `DISTINCT` with an `ORDER BY` over a
   different column (which PostgreSQL rejects), a2h orders by the aggregated value
   instead (valid + deterministic). Validated: Sakila → stock PostgreSQL 16 — all
-  three views create and query (997 / 997 / 200 rows); Sakila view coverage is now
-  7/8 (the last, `sales_by_store`, depends on MySQL's loose `GROUP BY`).
+  three views create and query (997 / 997 / 200 rows).
+- **Loose MySQL `GROUP BY` → strict PostgreSQL `GROUP BY`** (Sakila
+  `sales_by_store`): MySQL (with `ONLY_FULL_GROUP_BY` off) allows selecting
+  columns that are neither aggregated nor grouped; PostgreSQL rejects them. a2h
+  now appends each qualified, non-aggregate SELECT column reference to the
+  `GROUP BY` (aggregated columns skipped, already-grouped columns not duplicated,
+  only the outermost query touched). With this, **all 8 Sakila views migrate to
+  stock PostgreSQL**.
+
+### Changed
+- **Minimum HeliosDB-Nano version pinned to 3.58.5** (was 3.58.3). Nano 3.58.5
+  fixes a silent data-correctness bug where the index auto-created by `ALTER
+  TABLE … ADD FOREIGN KEY` was not backfilled from existing rows — so an
+  index-driven lookup or join on an FK column (after the load-then-add-FK
+  migration order) could return too few rows while a full scan returned the
+  correct data. The capability gate and compatibility doc now require ≥ 3.58.5.
 
 ## [0.9.1] — 2026-06-24
 
