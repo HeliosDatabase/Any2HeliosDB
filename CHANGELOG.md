@@ -3,7 +3,7 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.9.3] — 2026-06-24
 
 ### Added
 - **`a2h test-index` — target-side FK-index sanity check** (`TEST_INDEX`). For

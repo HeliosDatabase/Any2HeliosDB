@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "any2heliosdb"
-version = "0.9.2"
+version = "0.9.3"
 description = "Migrate Oracle / MySQL / PostgreSQL / SQL Server into HeliosDB or stock PostgreSQL — a modern, Python successor to Ora2Pg."
 readme = "README.md"
 license = { text = "Apache-2.0" }
