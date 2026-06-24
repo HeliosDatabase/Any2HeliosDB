@@ -144,7 +144,10 @@ def export(
     output: str = typer.Option("schema.sql", "--output", "-o", help="DDL output file."),
 ) -> None:
     """Export the source schema as HeliosDB DDL (tables, sequences, indexes, FKs, views)."""
-    from .config.store import build_source_adapter, build_type_registry, load_config
+    from .config.store import (
+        build_source_adapter, build_target_driver, build_type_registry, load_config)
+    from .core.catalog_model import DataTypeKind
+    from .core.orchestrator import _portable_view
     from .emit import ddl
 
     cfg = load_config(config)
@@ -164,8 +167,22 @@ def export(
                 stmt = ddl.render_index(t, idx, pc)
                 if stmt:
                     parts.append(stmt)
+        # Views are emitted as TARGET DDL: translate the source body toward the
+        # target dialect (backtick identifiers -> PG quoting, MySQL IF() -> CASE,
+        # NVL/DECODE/...) exactly as `migrate` does, so an exported view is valid
+        # on the target instead of raw source SQL. The target driver is built only
+        # to read its dialect + capabilities; no connection is opened.
+        try:
+            _tgt = build_target_driver(cfg)
+            view_dialect = getattr(_tgt, "dialect", "postgres")
+            view_caps = _tgt.capabilities
+        except Exception:  # noqa: BLE001 -- no/incomplete [target]: PG-wire default
+            view_dialect, view_caps = "postgres", None
+        bool_cols = {c.name for t in schema.tables for c in t.columns
+                     if c.data_type.kind is DataTypeKind.BOOLEAN}
         for v in schema.views:
-            parts.append(ddl.render_view(v, pc))
+            pv, _notes = _portable_view(v, view_dialect, view_caps, bool_cols)
+            parts.append(ddl.render_view(pv, pc))
         for t in schema.tables:
             parts.extend(ddl.render_foreign_keys(t, pc))
         with open(output, "w") as f:

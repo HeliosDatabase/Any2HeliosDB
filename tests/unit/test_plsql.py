@@ -55,6 +55,57 @@ def test_from_dual_stripped():
     assert "keep:from_dual" in applied
 
 
+def test_mysql_backtick_alias_with_space_is_quoted():
+    # Bug: a MySQL backtick alias containing a space was emitted UNQUOTED, which
+    # strict PostgreSQL / the PG-wire parser rejects ("found: code").
+    sql, applied, _ = rewrite_sql(
+        "SELECT `a`.`postal_code` AS `zip code` FROM staff a", FakeCapabilities()
+    )
+    assert 'AS "zip code"' in sql            # space -> double-quoted
+    assert "a.postal_code" in sql            # bare lower_snake stays unquoted
+    assert "`" not in sql                    # no MySQL backticks survive
+    assert "keep:mysql_backtick_ident" in applied
+
+
+def test_mysql_backtick_reserved_and_mixed_case_quoted():
+    sql, _, _ = rewrite_sql(
+        "SELECT `order`, `MixedCol`, `plain_col` FROM t", FakeCapabilities()
+    )
+    assert '"order"' in sql and '"MixedCol"' in sql      # reserved / mixed-case quoted
+    assert "plain_col" in sql and '"plain_col"' not in sql  # plain token stays bare
+
+
+def test_mysql_if_becomes_case():
+    # Bug: MySQL scalar IF() passed through untranslated; PostgreSQL has no IF().
+    sql, applied, _ = rewrite_sql(
+        "SELECT if(cu.active, 'active', '') AS act FROM customer cu", FakeCapabilities()
+    )
+    assert "CASE WHEN cu.active THEN 'active' ELSE '' END" in sql
+    assert "if(" not in sql.lower()
+    assert "keep:mysql_if" in applied
+
+
+def test_mysql_if_nested_and_arg_commas():
+    # A nested IF and commas inside arguments (both in a string literal and inside
+    # a function call) must all be handled by the balanced/quote-aware split.
+    sql, _, _ = rewrite_sql(
+        "SELECT if(a, if(b, 1, 2), concat(x, ',', y)) AS v FROM t", FakeCapabilities()
+    )
+    assert sql == (
+        "SELECT CASE WHEN a THEN CASE WHEN b THEN 1 ELSE 2 END "
+        "ELSE concat(x, ',', y) END AS v FROM t"
+    )
+    sql2, _, _ = rewrite_sql("SELECT if(active, 'a,b', 'c') FROM t", FakeCapabilities())
+    assert sql2 == "SELECT CASE WHEN active THEN 'a,b' ELSE 'c' END FROM t"
+
+
+def test_mysql_passes_are_noops_for_oracle_body():
+    # No backticks / no IF() in Oracle SQL -> the MySQL passes must not fire.
+    _, applied, _ = rewrite_sql("SELECT NVL(a, b) FROM dual", FakeCapabilities())
+    assert "keep:mysql_backtick_ident" not in applied
+    assert "keep:mysql_if" not in applied
+
+
 def test_rownum_le_becomes_limit():
     sql, applied, _ = rewrite_sql(
         "SELECT * FROM t WHERE ROWNUM <= 10", FakeCapabilities()
