@@ -80,7 +80,7 @@ CDC apply is edition-specific:
 
 - **Full**: validated.
 - **Lite**: validated on a current build.
-- **Nano**: validated on **Nano ≥ 3.58.3**; the tool refuses CDC apply against an
+- **Nano**: validated on **Nano ≥ 3.58.5**; the tool refuses CDC apply against an
   older Nano with a clear error rather than a mid-apply failure.
 
 ### `native` driver: `DPY-3010` / TNS handshake rejected
@@ -97,7 +97,7 @@ capability-probe behavior. In short:
 
 | Edition | Minimum | Bulk load | CDC apply |
 |---|---|---|---|
-| **HeliosDB-Nano** | 3.58.3 | INSERT (no COPY) | ✅ (≥ 3.58.3) |
+| **HeliosDB-Nano** | 3.58.5 | INSERT (no COPY) | ✅ (≥ 3.58.5) |
 | **HeliosDB-Lite** | 2.0 | COPY | ✅ |
 | **HeliosDB-Full** | current `main` build | COPY | ✅ |
 | **Stock PostgreSQL** | 14+ | COPY | ✅ |

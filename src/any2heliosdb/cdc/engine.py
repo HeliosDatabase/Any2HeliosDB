@@ -17,10 +17,13 @@ from .sources.oracle_scn import OracleScnSource
 from .trail import Trail
 
 # HeliosDB-Nano resolved INSERT ... ON CONFLICT DO UPDATE's quoted SET target in
-# v3.58.2 (#34), and v3.58.3 accepts E'...' escaped string literals as values so
-# the replicat's bytea ON CONFLICT upsert (psycopg escapes bytea params as
-# E'\\x..') works. Require 3.58.3 so keyed CDC apply is correct for binary data.
-_NANO_MIN_CDC_VERSION = (3, 58, 3)
+# v3.58.2 (#34); v3.58.3 accepts E'...' escaped string literals so the replicat's
+# bytea ON CONFLICT upsert (psycopg escapes bytea params as E'\\x..') works; and
+# v3.58.5 backfills the index auto-created by ADD FOREIGN KEY from existing rows
+# (without it, an index-driven lookup/join on an FK column after a load-then-add-
+# FK migration silently returned too few rows). Require 3.58.5 so a keyed CDC
+# apply — and the snapshot it builds on — are correct.
+_NANO_MIN_CDC_VERSION = (3, 58, 5)
 
 
 def _version_tuple(version: str):  # type: ignore[no-untyped-def]

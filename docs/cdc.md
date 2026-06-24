@@ -7,7 +7,7 @@ source-agnostic, so log-based sources and HeliosDB-as-source drop in later witho
 changing the apply side.
 
 > **Edition support.** CDC apply (`replicat`) is **validated on HeliosDB-Full and
-> HeliosDB-Lite**, and on **HeliosDB-Nano ≥ 3.58.3** (the tool refuses CDC apply
+> HeliosDB-Lite**, and on **HeliosDB-Nano ≥ 3.58.5** (the tool refuses CDC apply
 > against an older Nano with a clear error). Against any target, the resumable
 > [migrate + resume](reference/cli.md#a2h-resume) path is also available for
 > idempotent refreshes. See [HeliosDB compatibility](heliosdb-compatibility.md).
@@ -155,7 +155,7 @@ Each unit that flows source → trail → sink is a `ChangeRecord`
   LogMiner / supplemental-logging access.
 - **Block-granular ORA_ROWSCN** may over-capture (benign — apply is idempotent).
 - **Primary key required** per table; PK-less tables are skipped.
-- **Edition support** — apply is validated on Full and Lite, and on Nano ≥ 3.58.3
+- **Edition support** — apply is validated on Full and Lite, and on Nano ≥ 3.58.5
   (see the note above).
 
 ## Log-based capture — MySQL binlog (implemented)

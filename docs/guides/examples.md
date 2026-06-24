@@ -389,7 +389,7 @@ reachable without provisioning a CA on the migration host. CDC for SQL Server
 
 After an initial `migrate`, keep the target current with the **Extract → trail →
 Replicat** cycle. Apply (`replicat`) is **validated on Full and Lite**, and on
-**Nano ≥ 3.58.3** (older Nano is refused at runtime with a clear error) — see the
+**Nano ≥ 3.58.5** (older Nano is refused at runtime with a clear error) — see the
 [CDC doc](../cdc.md). The three verbs are detailed in the
 [CLI reference](../reference/cli.md#change-data-capture).
 
@@ -469,7 +469,7 @@ After this the target has the inserted row, the updated salary, and the deleted
 row gone — propagated through the log. (`a2h extracts` shows the binlog coordinate
 as the watermark.)
 
-> **Nano gating.** CDC apply requires **Nano ≥ 3.58.3**. Against an older Nano,
+> **Nano gating.** CDC apply requires **Nano ≥ 3.58.5**. Against an older Nano,
 > `a2h replicat` fails fast with a clear error rather than a cryptic mid-apply SQL
 > error; upgrade Nano, or use migrate/resume for refreshes.
 

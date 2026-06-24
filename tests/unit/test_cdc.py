@@ -66,17 +66,18 @@ def test_version_tuple_parses_helios_banner():
 
 
 def test_nano_cdc_apply_gate_threshold():
-    # The replicat gate allows Nano only from the #34 fix (v3.58.2) onward; older
-    # or unparseable versions are refused so a pre-fix Nano can't silently corrupt
-    # keyed upserts (ON CONFLICT DO UPDATE quoted SET target).
+    # The replicat gate requires Nano >= 3.58.5 (the FK-index backfill correctness
+    # fix; 3.58.3's E'...' bytea fix is also needed and subsumed). Older or
+    # unparseable versions are refused so a pre-fix Nano can't silently corrupt
+    # keyed upserts or serve index-driven lookups from an unbackfilled FK index.
     from any2heliosdb.cdc.engine import _NANO_MIN_CDC_VERSION, _version_tuple
 
     def allowed(v):
         t = _version_tuple(v)
         return t is not None and t >= _NANO_MIN_CDC_VERSION
 
-    assert allowed("3.58.3") and allowed("3.59.0") and allowed("4.0.0")
-    assert not allowed("3.58.2") and not allowed("3.58.1") and not allowed("3.0.0")
+    assert allowed("3.58.5") and allowed("3.59.0") and allowed("4.0.0")
+    assert not allowed("3.58.4") and not allowed("3.58.3") and not allowed("3.0.0")
     assert not allowed("unknown")
 
 
