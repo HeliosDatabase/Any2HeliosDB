@@ -147,6 +147,25 @@ def test_mysql_group_concat_distinct_with_order_by_orders_by_value():
     assert out == "string_agg(DISTINCT (cat.name)::text, '; ' ORDER BY (cat.name)::text)"
 
 
+def test_strict_group_by_adds_nonaggregated_select_columns():
+    # MySQL loose GROUP BY: a non-aggregated column not in GROUP BY. PG rejects it;
+    # a2h appends it. The aggregated column (sum) is left out.
+    sql, applied, _ = rewrite_sql(
+        "select c.city AS town, sum(p.amount) AS total from t group by s.store_id "
+        "order by c.city",
+        FakeCapabilities(),
+    )
+    assert "group by s.store_id, c.city " in sql
+    assert "keep:group_by_nonaggregates" in applied
+
+
+def test_strict_group_by_noop_when_already_grouped_or_absent():
+    _, a1, _ = rewrite_sql("select c.city, sum(x) from t c group by c.city", FakeCapabilities())
+    assert "keep:group_by_nonaggregates" not in a1
+    _, a2, _ = rewrite_sql("select a.b from t a", FakeCapabilities())
+    assert "keep:group_by_nonaggregates" not in a2
+
+
 def test_mysql_passes_are_noops_for_oracle_body():
     # No backticks / no IF() in Oracle SQL -> the MySQL passes must not fire.
     _, applied, _ = rewrite_sql("SELECT NVL(a, b) FROM dual", FakeCapabilities())
