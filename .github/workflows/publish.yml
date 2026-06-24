@@ -1,0 +1,60 @@
+name: Publish to PyPI
+
+# Publishes any2heliosdb to PyPI via Trusted Publishing (OpenID Connect) — no
+# API token or stored secret. PyPI is configured with a Trusted Publisher for
+# HeliosDatabase/Any2HeliosDB, workflow `publish.yml`, environment `pypi`.
+#
+# Triggers:
+#   * a published GitHub Release (the normal path — tag a release, it publishes)
+#   * manual dispatch from the Actions tab (for the first release / re-runs)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & verify distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package + run unit tests
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+          python -m pytest tests/unit -q
+      - name: Build sdist + wheel and check metadata
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/any2heliosdb
+    permissions:
+      id-token: write        # REQUIRED: mints the OIDC token Trusted Publishing uses
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
