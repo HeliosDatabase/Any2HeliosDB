@@ -313,6 +313,112 @@ def _keep_mysql_group_concat(sql: str) -> Tuple[str, bool]:
     return sql, fired
 
 
+# Loose MySQL GROUP BY -> strict PostgreSQL GROUP BY.
+_RE_SELECT = re.compile(r"\bSELECT\b", re.IGNORECASE)
+_RE_FROM = re.compile(r"\bFROM\b", re.IGNORECASE)
+_RE_GROUP_BY = re.compile(r"\bGROUP\s+BY\b", re.IGNORECASE)
+_RE_GB_END = re.compile(r"\b(?:ORDER\s+BY|HAVING|LIMIT|OFFSET|WINDOW|UNION|INTERSECT|EXCEPT)\b",
+                        re.IGNORECASE)
+_RE_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_AGG_FNS = frozenset({
+    "sum", "count", "avg", "min", "max", "string_agg", "group_concat", "array_agg",
+    "json_agg", "jsonb_agg", "bool_and", "bool_or", "every", "bit_and", "bit_or",
+    "stddev", "stddev_pop", "stddev_samp", "variance", "var_pop", "var_samp",
+})
+
+
+def _nonagg_qualified_refs(s: str) -> List[str]:
+    """Ordered, unique qualified column refs (``alias.col``) in *s* that are not
+    arguments of an aggregate function and are not themselves function calls."""
+    refs: List[str] = []
+    seen = set()
+    stack: List[bool] = []      # one flag per open paren: is it an aggregate's?
+    quote: Optional[str] = None
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch == "(":
+            j = i - 1
+            while j >= 0 and s[j].isspace():
+                j -= 1
+            k = j
+            while k >= 0 and (s[k].isalnum() or s[k] == "_"):
+                k -= 1
+            stack.append(s[k + 1:j + 1].lower() in _AGG_FNS)
+            i += 1
+            continue
+        if ch == ")":
+            if stack:
+                stack.pop()
+            i += 1
+            continue
+        m = _RE_WORD.match(s, i)
+        if not m:
+            i += 1
+            continue
+        end = m.end()
+        if end < n and s[end] == ".":
+            m2 = _RE_WORD.match(s, end + 1)
+            if m2:
+                ref = "{}.{}".format(m.group(0), m2.group(0))
+                end = m2.end()
+                e2 = end
+                while e2 < n and s[e2].isspace():
+                    e2 += 1
+                is_call = e2 < n and s[e2] == "("
+                if not any(stack) and not is_call and ref.lower() not in seen:
+                    seen.add(ref.lower())
+                    refs.append(ref)
+        i = end
+    return refs
+
+
+def _keep_group_by_nonaggregates(sql: str) -> Tuple[str, bool]:
+    """Add a grouped query's non-aggregated SELECT columns to its GROUP BY.
+
+    MySQL (with ``ONLY_FULL_GROUP_BY`` off) allows selecting columns that are
+    neither aggregated nor grouped; PostgreSQL rejects them ("column ... must
+    appear in the GROUP BY clause"). We append every qualified, non-aggregate
+    column reference from the outer SELECT list that isn't already grouped. Only
+    the outermost query is touched (a subquery's SELECT/GROUP BY sit at paren
+    depth > 0, so the top-level scan skips them).
+    """
+    gb = _find_top_level_kw(sql, _RE_GROUP_BY)
+    if gb < 0:
+        return sql, False
+    sel = _find_top_level_kw(sql, _RE_SELECT)
+    frm = _find_top_level_kw(sql, _RE_FROM)
+    if sel < 0 or frm < 0 or not (sel < frm < gb):
+        return sql, False
+    select_list = sql[_RE_SELECT.match(sql, sel).end():frm]
+    gb_kw_end = _RE_GROUP_BY.match(sql, gb).end()
+    rest = sql[gb_kw_end:]
+    cut = len(rest)
+    kw_at = _find_top_level_kw(rest, _RE_GB_END)
+    if kw_at >= 0:
+        cut = min(cut, kw_at)
+    semi = rest.find(";")
+    if semi >= 0:
+        cut = min(cut, semi)
+    existing = [x.strip() for x in _split_top_level(rest[:cut]) if x.strip()]
+    existing_lower = {e.lower() for e in existing}
+    additions = [r for r in _nonagg_qualified_refs(select_list)
+                 if r.lower() not in existing_lower]
+    if not additions:
+        return sql, False
+    new_clause = " " + ", ".join(existing + additions) + " "
+    return sql[:gb_kw_end] + new_clause + rest[cut:], True
+
+
 # --------------------------------------------------------------------------- #
 # DELEGATE passes — capability-gated function translation                     #
 # --------------------------------------------------------------------------- #
@@ -472,6 +578,9 @@ def rewrite_sql(sql: str, capabilities) -> Tuple[str, List[str], List[TargetGap]
     out, fired = _keep_mysql_group_concat(out)
     if fired:
         applied.append("keep:mysql_group_concat")
+    out, fired = _keep_group_by_nonaggregates(out)
+    if fired:
+        applied.append("keep:group_by_nonaggregates")
 
     # Oracle (+) outer join — detected only, never silently rewritten.
     oj = _RE_OUTER_JOIN.findall(out)
