@@ -27,6 +27,7 @@ import re
 from typing import List, Optional, Tuple
 
 from ..constants import Edition, Severity
+from ..core.identifiers import quote_ident
 from .gap import TargetGap
 
 # Functions we treat as "the target already has it" even if the probe did not
@@ -142,6 +143,88 @@ def _keep_rownum_limit(sql: str) -> Tuple[str, bool]:
 
 
 # --------------------------------------------------------------------------- #
+# KEEP passes — MySQL source-dialect normalization (no PG-family equivalent)  #
+# --------------------------------------------------------------------------- #
+
+# MySQL backtick-quoted identifier. MySQL is the only source dialect that
+# backtick-quotes identifiers; Oracle/PG view bodies never contain backticks,
+# so this pass is a no-op for them.
+_RE_BACKTICK = re.compile(r"`([^`]+)`")
+
+# MySQL scalar IF(cond, a, b) — PostgreSQL has no scalar IF() function.
+_RE_IF_CALL = re.compile(r"\bIF\s*\(", re.IGNORECASE)
+
+
+def _keep_mysql_backtick_idents(sql: str) -> Tuple[str, bool]:
+    """``\\`ident\\``` -> a PostgreSQL identifier via the shared quoter.
+
+    A plain ``lower_snake`` name renders bare; a name with spaces, a reserved
+    word, or mixed case is double-quoted (so ``AS \\`zip code\\``` becomes
+    ``AS "zip code"``). Without this, a MySQL view alias containing a space
+    reaches a PG-wire target unquoted and the parser rejects the statement.
+    """
+    new, n = _RE_BACKTICK.subn(lambda m: quote_ident(m.group(1)), sql)
+    return new, n > 0
+
+
+def _matching_paren(sql: str, open_idx: int) -> int:
+    """Index of the ``)`` matching the ``(`` at *open_idx*, or -1 if unbalanced.
+
+    Parens inside single/double-quoted string literals are ignored.
+    """
+    depth = 0
+    quote: Optional[str] = None
+    i = open_idx
+    while i < len(sql):
+        ch = sql[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _keep_mysql_if(sql: str) -> Tuple[str, bool]:
+    """``IF(cond, a, b)`` -> ``CASE WHEN cond THEN a ELSE b END``.
+
+    PostgreSQL (and HeliosDB over PG-wire) has no scalar ``IF()``; MySQL view
+    bodies use it (e.g. Sakila ``staff_list`` / ``customer_list``). Balanced-paren
+    extraction plus a top-level comma split handle nested calls and commas inside
+    the arguments; a nested ``IF`` is rewritten by re-scanning from the same
+    offset. Only the canonical 3-argument form is translated; any other arity is
+    left in place.
+    """
+    fired = False
+    pos = 0
+    while True:
+        m = _RE_IF_CALL.search(sql, pos)
+        if not m:
+            break
+        open_idx = m.end() - 1
+        close_idx = _matching_paren(sql, open_idx)
+        if close_idx == -1:
+            break
+        args = _split_top_level(sql[open_idx + 1:close_idx])
+        if len(args) != 3:
+            pos = m.end()  # not a translatable IF(); keep scanning past it
+            continue
+        cond, then_val, else_val = (a.strip() for a in args)
+        rep = "CASE WHEN {} THEN {} ELSE {} END".format(cond, then_val, else_val)
+        sql = sql[:m.start()] + rep + sql[close_idx + 1:]
+        fired = True
+        pos = m.start()  # re-scan from here so a nested IF inside rep is caught
+    return sql, fired
+
+
+# --------------------------------------------------------------------------- #
 # DELEGATE passes — capability-gated function translation                     #
 # --------------------------------------------------------------------------- #
 
@@ -163,12 +246,25 @@ _RE_SYSTIMESTAMP = re.compile(r"\bSYSTIMESTAMP\b", re.IGNORECASE)
 
 
 def _split_top_level(arg_str: str) -> List[str]:
-    """Split a DECODE arg list on top-level commas (respecting parens)."""
+    """Split an argument list on top-level commas.
+
+    Commas inside nested parens *and* inside single/double-quoted string literals
+    are not split points (so ``if(x, 'a,b', 'c')`` keeps three args). Used by both
+    the DECODE and IF translators.
+    """
     parts: List[str] = []
     depth = 0
+    quote: Optional[str] = None
     cur: List[str] = []
     for ch in arg_str:
-        if ch == "(":
+        if quote is not None:
+            cur.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            cur.append(ch)
+        elif ch == "(":
             depth += 1
             cur.append(ch)
         elif ch == ")":
@@ -274,6 +370,16 @@ def rewrite_sql(sql: str, capabilities) -> Tuple[str, List[str], List[TargetGap]
     out, fired = _keep_rownum_limit(out)
     if fired:
         applied.append("keep:rownum_limit")
+
+    # MySQL source-dialect normalization (no-op for Oracle/PG bodies): convert
+    # backtick identifiers to PG quoting and IF() to CASE so a MySQL view body
+    # is valid SQL on every PG-wire target.
+    out, fired = _keep_mysql_backtick_idents(out)
+    if fired:
+        applied.append("keep:mysql_backtick_ident")
+    out, fired = _keep_mysql_if(out)
+    if fired:
+        applied.append("keep:mysql_if")
 
     # Oracle (+) outer join — detected only, never silently rewritten.
     oj = _RE_OUTER_JOIN.findall(out)

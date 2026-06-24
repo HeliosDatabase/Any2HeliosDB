@@ -189,10 +189,13 @@ class MySQLAdapter(SourceAdapter):
             "SELECT TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS "
             "WHERE TABLE_SCHEMA=%s ORDER BY TABLE_NAME", db):
             # MySQL emits view bodies with backtick-quoted, schema-qualified
-            # identifiers (`hr`.`employees`.`col`). Strip backticks and the schema
-            # prefix so the body is portable SQL the target accepts. Best-effort;
-            # complex views may still need manual review (the orchestrator warns).
-            body = str(vdef).replace("`", "").replace("{}.".format(db), "")
+            # identifiers (`hr`.`employees`.`col`). Drop only the schema qualifier
+            # (the target schema differs) but KEEP the backtick quoting intact, so
+            # the target-aware view translator can render each identifier
+            # correctly: a backtick alias containing a space must become
+            # "zip code" on a PG-wire target, not a bare (invalid) token. Stripping
+            # backticks here is lossy and was emitting unquoted multi-word aliases.
+            body = re.sub(r"`{}`\.".format(re.escape(db)), "", str(vdef))
             out.append(View(name=vname, definition=body))
         return out
 

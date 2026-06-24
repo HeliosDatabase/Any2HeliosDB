@@ -3,6 +3,22 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **MySQL → PostgreSQL view-body translation** (reported via Sakila `staff_list`
+  / `customer_list`): a backtick-quoted alias containing a space (or a reserved
+  word / mixed case) was emitted **unquoted** — ``AS `zip code` `` became the
+  invalid `AS zip code` — because the MySQL adapter stripped *all* backticks. The
+  adapter now preserves backtick quoting (dropping only the schema qualifier),
+  and the view-body translator renders each identifier through the shared quoter
+  (`AS "zip code"`; a plain `lower_snake` name stays bare). MySQL scalar
+  `IF(c, a, b)` is translated to `CASE WHEN c THEN a ELSE b END` (balanced-paren,
+  quote-aware argument split, nested-`IF` safe). And `a2h export` now applies the
+  same target-dialect view translation that `migrate` does, so an exported view
+  is valid target SQL instead of raw source SQL. Validated end-to-end: Sakila →
+  stock PostgreSQL 16, `staff_list` / `customer_list` create and query cleanly.
+
 ## [0.9.1] — 2026-06-24
 
 ### Added
