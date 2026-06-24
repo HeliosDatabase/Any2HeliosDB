@@ -99,6 +99,54 @@ def test_mysql_if_nested_and_arg_commas():
     assert sql2 == "SELECT CASE WHEN active THEN 'a,b' ELSE 'c' END FROM t"
 
 
+def test_mysql_group_concat_simple_separator():
+    sql, applied, _ = rewrite_sql(
+        "SELECT group_concat(concat(a, ' ', b) SEPARATOR ', ') AS names FROM t",
+        FakeCapabilities(),
+    )
+    assert "string_agg((concat(a, ' ', b))::text, ', ')" in sql
+    assert "group_concat" not in sql.lower()
+    assert "keep:mysql_group_concat" in applied
+
+
+def test_mysql_group_concat_default_sep_distinct_and_order():
+    # Default separator (MySQL ','), DISTINCT, and ORDER BY each handled.
+    sql1, _, _ = rewrite_sql("SELECT group_concat(x) FROM t", FakeCapabilities())
+    assert "string_agg((x)::text, ',')" in sql1
+    sql2, _, _ = rewrite_sql("SELECT group_concat(distinct y) FROM t", FakeCapabilities())
+    assert "string_agg(DISTINCT (y)::text, ',')" in sql2
+    sql3, _, _ = rewrite_sql(
+        "SELECT group_concat(f.title ORDER BY f.title ASC SEPARATOR ', ') FROM t",
+        FakeCapabilities(),
+    )
+    assert "string_agg((f.title)::text, ', ' ORDER BY f.title ASC)" in sql3
+
+
+def test_mysql_group_concat_nested_in_subquery():
+    # actor_info shape: an outer DISTINCT GROUP_CONCAT whose value contains an
+    # inner GROUP_CONCAT (with its own ORDER BY + SEPARATOR) inside a subquery.
+    # The inner clauses must NOT be consumed by the outer; both become string_agg.
+    src = ("group_concat(distinct concat(c.name,(select group_concat("
+           "f.title order by f.title ASC separator ', ') from t)) separator '; ')")
+    out, _, _ = rewrite_sql(src, FakeCapabilities())
+    assert out == (
+        "string_agg(DISTINCT (concat(c.name,(select string_agg("
+        "(f.title)::text, ', ' order by f.title ASC) from t)))::text, '; ')"
+    )
+    assert "group_concat" not in out.lower()
+
+
+def test_mysql_group_concat_distinct_with_order_by_orders_by_value():
+    # PG forbids ORDER BY a non-argument expr in a DISTINCT aggregate (MySQL
+    # allows it, as in Sakila actor_info). We order by the aggregated value
+    # instead, which is valid PG and deterministic.
+    out, _, _ = rewrite_sql(
+        "group_concat(DISTINCT cat.name ORDER BY cat.name SEPARATOR '; ')",
+        FakeCapabilities(),
+    )
+    assert out == "string_agg(DISTINCT (cat.name)::text, '; ' ORDER BY (cat.name)::text)"
+
+
 def test_mysql_passes_are_noops_for_oracle_body():
     # No backticks / no IF() in Oracle SQL -> the MySQL passes must not fire.
     _, applied, _ = rewrite_sql("SELECT NVL(a, b) FROM dual", FakeCapabilities())

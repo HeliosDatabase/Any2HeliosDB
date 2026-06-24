@@ -224,6 +224,95 @@ def _keep_mysql_if(sql: str) -> Tuple[str, bool]:
     return sql, fired
 
 
+# MySQL GROUP_CONCAT([DISTINCT] expr [ORDER BY ...] [SEPARATOR sep]).
+_RE_GROUP_CONCAT = re.compile(r"\bGROUP_CONCAT\s*\(", re.IGNORECASE)
+_RE_GC_SEPARATOR = re.compile(r"SEPARATOR\b", re.IGNORECASE)
+_RE_GC_ORDER_BY = re.compile(r"ORDER\s+BY\b", re.IGNORECASE)
+_RE_GC_DISTINCT = re.compile(r"^\s*DISTINCT\b", re.IGNORECASE)
+
+
+def _find_top_level_kw(s: str, kw: "re.Pattern[str]") -> int:
+    """Index of the first match of *kw* at paren-depth 0 and outside string
+    literals, or -1. Lets a GROUP_CONCAT find its own ORDER BY / SEPARATOR
+    without matching one that belongs to a nested GROUP_CONCAT in a subquery.
+    """
+    depth = 0
+    quote: Optional[str] = None
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0 and kw.match(s, i):
+            return i
+        i += 1
+    return -1
+
+
+def _keep_mysql_group_concat(sql: str) -> Tuple[str, bool]:
+    """``GROUP_CONCAT([DISTINCT] expr [ORDER BY ...] [SEPARATOR s])`` ->
+    ``string_agg([DISTINCT] (expr)::text, s [ORDER BY ...])``.
+
+    PostgreSQL has no GROUP_CONCAT; ``string_agg`` is the equivalent but *requires*
+    a delimiter (MySQL defaults to ``,``) and places ORDER BY after it. The value
+    is cast to text so non-text columns aggregate too. Balanced-paren extraction +
+    top-level clause detection means a nested GROUP_CONCAT in a subquery (with its
+    own ORDER BY / SEPARATOR) is rewritten by re-scanning from the same offset.
+    """
+    fired = False
+    pos = 0
+    while True:
+        m = _RE_GROUP_CONCAT.search(sql, pos)
+        if not m:
+            break
+        open_idx = m.end() - 1
+        close_idx = _matching_paren(sql, open_idx)
+        if close_idx == -1:
+            break
+        inner = sql[open_idx + 1:close_idx]
+        si = _find_top_level_kw(inner, _RE_GC_SEPARATOR)
+        if si >= 0:
+            sep = inner[si + len("SEPARATOR"):].strip()
+            head = inner[:si]
+        else:
+            sep = "','"            # MySQL's default GROUP_CONCAT separator
+            head = inner
+        oi = _find_top_level_kw(head, _RE_GC_ORDER_BY)
+        if oi >= 0:
+            order_by = " " + head[oi:].strip()
+            head = head[:oi]
+        else:
+            order_by = ""
+        distinct = ""
+        dm = _RE_GC_DISTINCT.match(head)
+        if dm:
+            distinct = "DISTINCT "
+            head = head[dm.end():]
+        value = head.strip()
+        # MySQL GROUP_CONCAT(a, b, ...) concatenates its args; PG takes one expr.
+        if len(_split_top_level(value)) > 1:
+            value = "concat({})".format(value)
+        cast_value = "({})::text".format(value)
+        if distinct and order_by:
+            # PostgreSQL requires the ORDER BY of a DISTINCT aggregate to be over
+            # the DISTINCT argument; MySQL allows ordering by an unrelated column.
+            # Order by the aggregated value instead -> valid and deterministic.
+            order_by = " ORDER BY {}".format(cast_value)
+        rep = "string_agg({}{}, {}{})".format(distinct, cast_value, sep, order_by)
+        sql = sql[:m.start()] + rep + sql[close_idx + 1:]
+        fired = True
+        pos = m.start()  # re-scan so a nested GROUP_CONCAT in rep is caught
+    return sql, fired
+
+
 # --------------------------------------------------------------------------- #
 # DELEGATE passes — capability-gated function translation                     #
 # --------------------------------------------------------------------------- #
@@ -380,6 +469,9 @@ def rewrite_sql(sql: str, capabilities) -> Tuple[str, List[str], List[TargetGap]
     out, fired = _keep_mysql_if(out)
     if fired:
         applied.append("keep:mysql_if")
+    out, fired = _keep_mysql_group_concat(out)
+    if fired:
+        applied.append("keep:mysql_group_concat")
 
     # Oracle (+) outer join — detected only, never silently rewritten.
     oj = _RE_OUTER_JOIN.findall(out)
