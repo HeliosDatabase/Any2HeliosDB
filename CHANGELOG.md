@@ -18,6 +18,17 @@ All notable changes to Any2HeliosDB are documented here. This project adheres to
   same target-dialect view translation that `migrate` does, so an exported view
   is valid target SQL instead of raw source SQL. Validated end-to-end: Sakila →
   stock PostgreSQL 16, `staff_list` / `customer_list` create and query cleanly.
+- **MySQL `GROUP_CONCAT` → PostgreSQL `string_agg`** (Sakila `film_list`,
+  `nicer_but_slower_film_list`, `actor_info`): `GROUP_CONCAT([DISTINCT] expr
+  [ORDER BY ...] [SEPARATOR s])` now becomes `string_agg((expr)::text, s [ORDER
+  BY ...])` — MySQL's default `,` separator is supplied, the value is cast to
+  text so non-text columns aggregate, multi-arg forms wrap in `concat(...)`, and a
+  nested `GROUP_CONCAT` in a subquery (with its own ORDER BY / SEPARATOR) is
+  translated too. Where MySQL combines `DISTINCT` with an `ORDER BY` over a
+  different column (which PostgreSQL rejects), a2h orders by the aggregated value
+  instead (valid + deterministic). Validated: Sakila → stock PostgreSQL 16 — all
+  three views create and query (997 / 997 / 200 rows); Sakila view coverage is now
+  7/8 (the last, `sales_by_store`, depends on MySQL's loose `GROUP BY`).
 
 ## [0.9.1] — 2026-06-24
 
