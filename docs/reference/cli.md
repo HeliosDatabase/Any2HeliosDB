@@ -558,7 +558,7 @@ apply advance on independent, durable cursors. v1 capture is Oracle
 [examples scenario 5](../guides/examples.md#scenario-5) for runnable cycles.
 
 > **Edition support.** Apply (`replicat`) is **validated on HeliosDB-Full and
-> HeliosDB-Lite**, and on **HeliosDB-Nano ≥ 3.58.3** — against an older Nano it is
+> HeliosDB-Lite**, and on **HeliosDB-Nano ≥ 3.58.5** — against an older Nano it is
 > **refused** at runtime with a clear error (not a cryptic mid-apply failure). The
 > resumable [`migrate` + `resume`](#a2h-resume) path is also available for
 > idempotent refreshes against any target. See
@@ -641,7 +641,7 @@ apply-side schema and, for reconciliation, the live key set) and target.
 
 **Exit codes.** `0` on success. `1` on error — including the explicit refusal the
 tool raises when the live probe detects a Nano target below the CDC-apply minimum
-(3.58.3), so you get a clear message instead of a cryptic mid-apply failure.
+(3.58.5), so you get a clear message instead of a cryptic mid-apply failure.
 
 ### `a2h extracts`
 

@@ -9,7 +9,7 @@ adapts to whatever the target actually supports.
 
 | Target | Minimum version | Bulk load | Notes |
 |---|---|---|---|
-| **HeliosDB-Nano** | 3.58.3 | INSERT (no COPY) | The Apache edition; PG-wire. CDC apply is gated to **Nano ≥ 3.58.3**. |
+| **HeliosDB-Nano** | 3.58.5 | INSERT (no COPY) | The Apache edition; PG-wire. CDC apply is gated to **Nano ≥ 3.58.5**. |
 | **HeliosDB-Lite** | 2.0 | COPY | PG-wire. Concurrent transactions are not yet supported, so the loader uses a serial-retry mop-up pass (the load still converges with no duplicates). |
 | **HeliosDB-Full** | current `main` build | COPY | PG-wire. The most complete edition: migrate, validate, and CDC. |
 | **Stock PostgreSQL** | 14+ | COPY | The reference PG-wire target; creates sequences natively and runs full PL/pgSQL. |
@@ -51,7 +51,7 @@ Earlier HeliosDB builds had a handful of PG-wire compatibility gaps that affecte
 specific migration paths (for example bytea round-tripping, numeric wire typing,
 `ON CONFLICT … DO UPDATE`, and quoted-identifier handling). **These are resolved
 in the current HeliosDB releases listed above.** a2h pins the minimum version per
-edition (and gates CDC apply to Nano ≥ 3.58.3) so that, on a supported build, the
+edition (and gates CDC apply to Nano ≥ 3.58.5) so that, on a supported build, the
 full workflow — migrate, validate, and (on Lite/Full) CDC — runs cleanly. On an
 older build, a2h still degrades gracefully via the capability probe and reports
 any work-around it had to apply.
@@ -91,7 +91,7 @@ and reports the work-around it applied rather than failing silently.
 | Bulk load | ✅ INSERT (no COPY) | ✅ COPY | ✅ COPY | ✅ COPY |
 | Parallel + resumable load | ✅ | ✅ (serial-retry converges) | ✅ | ✅ |
 | Validation (`test` / `test-count` / `test-data`) | ✅ | ✅ | ✅ | ✅ |
-| CDC apply (`replicat`) | ✅ (≥ 3.58.3) | ✅ | ✅ | ✅ |
+| CDC apply (`replicat`) | ✅ (≥ 3.58.5) | ✅ | ✅ | ✅ |
 
 ¹ Sequences are emitted as standard PostgreSQL DDL. Stock PostgreSQL and
 sequence-supporting HeliosDB builds create them natively; on a build that does

@@ -147,8 +147,8 @@ sources' log-based CDC is [roadmap](docs/cdc.md).
 Minimum HeliosDB build per edition (full details in
 [docs/heliosdb-compatibility.md](docs/heliosdb-compatibility.md)):
 
-- **Nano** — `heliosdb-nano` **3.58.3** or newer. The tool gates **CDC apply to
-  Nano ≥ 3.58.3** and refuses older builds with a clear error.
+- **Nano** — `heliosdb-nano` **3.58.5** or newer. The tool gates **CDC apply to
+  Nano ≥ 3.58.5** and refuses older builds with a clear error.
 - **Lite** — **2.0** or newer. Migrate, validate, **and CDC apply** are green on a
   current build; the loader's serial-retry pass handles Lite's lack of concurrent
   transactions.
@@ -172,13 +172,13 @@ does not apply to Nano.
 | Bulk load | ✅ INSERT (no COPY) | ✅ COPY | ✅ COPY |
 | Parallel + resumable load | ✅ | ✅ (serial-retry converges¹) | ✅ |
 | Validation (`test` / `test-count` / `test-data`) | ✅ | ✅ | ✅ |
-| CDC apply (`replicat`) | ✅ (≥ 3.58.3)² | ✅ | ✅ |
+| CDC apply (`replicat`) | ✅ (≥ 3.58.5)² | ✅ | ✅ |
 
 ¹ Lite rejects concurrent transactions today, so a chunk can fail under parallel
 contention yet succeed on a serial retry; the loader runs a serial mop-up pass and
 chunks are idempotent, so the load still converges with no duplicates.
 
-² The tool gates CDC apply to **Nano ≥ 3.58.3** and refuses older builds with a
+² The tool gates CDC apply to **Nano ≥ 3.58.5** and refuses older builds with a
 clear error.
 
 ³ Sequences are emitted as standard PostgreSQL DDL. Stock PostgreSQL and

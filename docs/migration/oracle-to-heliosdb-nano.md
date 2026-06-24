@@ -2,7 +2,7 @@
 
 **Status: ✅ validated** for migrate + validation + resume via the `psycopg`
 driver, against Oracle 21c XE. Load is **INSERT-based** (Nano has no COPY). CDC
-apply requires **Nano ≥ 3.58.3**.
+apply requires **Nano ≥ 3.58.5**.
 
 Nano is the Apache edition. The a2h integration suite passes against a current
 Nano build: migrate + validate, the wizard smoke test, and resumable migrate +
@@ -10,14 +10,14 @@ resume.
 
 ## Prerequisites
 
-- **HeliosDB-Nano 3.58.3 or newer.** See
+- **HeliosDB-Nano 3.58.5 or newer.** See
   [HeliosDB compatibility](../heliosdb-compatibility.md) for the capability probe
   and minimum builds. Keep Nano current — older builds may have target-side gaps
   that current releases have closed.
 - An Oracle source you can introspect and read.
 - `pip install -e ".[oracle]"`; verify with `a2h doctor`.
 
-Nano's server banner looks like `16.0 (HeliosDB Nano 3.58.3)`; the probe
+Nano's server banner looks like `16.0 (HeliosDB Nano 3.58.5)`; the probe
 classifies it as `nano`.
 
 ## Driver choice
@@ -113,7 +113,7 @@ migrate/validate workflow is green; see
 
 ## CDC support
 
-**Validated on Nano ≥ 3.58.3.** The standard `extract`/`replicat`/`extracts` cycle
+**Validated on Nano ≥ 3.58.5.** The standard `extract`/`replicat`/`extracts` cycle
 applies. Against an **older Nano**, a2h refuses CDC apply at runtime with a clear
 error (rather than a cryptic mid-apply failure) — upgrade Nano, or keep the target
 current with an idempotent re-run of `a2h migrate` (or `a2h resume`). See
