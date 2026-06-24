@@ -1,0 +1,34 @@
+# Runtime data for local test targets (HeliosDB data dirs, server logs)
+.runtime/
+# Migration working output (schema/data/reports/logs + run manifests)
+migration_output/
+*.hdb
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets must never be committed; config references env vars instead.
+*.secret
+.env
+
+# Stray HeliosDB server runtime dirs (if a target is pointed at the repo root)
+heliosdb-data/
+data/
+# CDC + resume state written under a project output dir
+*.db
+trail/
+
+# Claude Code agent worktrees / local session state
+.claude/
