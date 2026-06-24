@@ -39,6 +39,7 @@ copy-pasteable end-to-end walkthroughs see the
 | `test` | TEST: object-inventory diff (source vs target). |
 | `test-count` | TEST_COUNT: row counts on both sides. |
 | `test-data` | TEST_DATA: ordered, sampled row comparison + checksums. |
+| `test-index` | TEST_INDEX: target-side FK-index sanity (catches a stale/unbackfilled FK index). |
 | `report` | Render the assessment report (text alias of `assess`). |
 | `extract` | Capture source changes into a named CDC trail. |
 | `replicat` | Apply a named trail to the target (idempotent). |
@@ -546,6 +547,36 @@ TEST_DATA: PASS
 
 **Exit codes.** `0` if every table passed; `1` if any table had a BLOCKER. Use
 `--sample 0` for a full, exact comparison (slower on large tables).
+
+### `a2h test-index`
+
+```bash
+a2h test-index [-c config.toml]
+```
+
+**Purpose.** TEST_INDEX — a target-side index-correctness check that `test-data`
+cannot do. For each foreign-key column it compares an **index-eligible** count
+(`WHERE col = (SELECT min(col) …)`) against an **index-defeated** full-scan count
+(`WHERE col::text = (…)::text`). They must agree; a mismatch means the target
+served the equality lookup from a stale or empty index — e.g. an FK index
+auto-created by `ADD FOREIGN KEY` but never backfilled from the rows loaded before
+the FK was added (a2h loads data first, adds FKs after). Because `test-data` never
+filters or joins on an FK column, only this check catches that class of silent,
+target-side regression. Target-only (the source supplies the FK metadata; the
+probe runs on the target) and type-agnostic via the `::text` defeat.
+
+**Prints.** One `TEST_INDEX: PASS|FAIL` block per table, with metrics
+(`fk_columns_checked`, `mismatches`). A table with no FKs or no non-null FK values
+reports `fk_columns_checked: 0` (nothing to probe).
+
+```
+$ a2h test-index -c config.toml
+TEST_INDEX: PASS
+  metrics: {'fk_columns_checked': 2, 'mismatches': 0}
+```
+
+**Exit codes.** `0` if every FK-column probe agreed; `1` if any table had a
+mismatch (BLOCKER), so it gates CI alongside the other `test-*` checks.
 
 ---
 

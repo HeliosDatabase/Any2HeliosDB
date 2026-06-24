@@ -3,6 +3,21 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`a2h test-index` — target-side FK-index sanity check** (`TEST_INDEX`). For
+  each foreign-key column it compares an index-eligible equality count
+  (`WHERE col = (SELECT min(col) …)`) against an index-defeated full-scan count
+  (`WHERE col::text = (…)::text`); a mismatch means the target answered the
+  lookup from a stale/empty index — e.g. an FK index auto-created by
+  `ADD FOREIGN KEY` but not backfilled from rows loaded before the FK was added
+  (the class of bug fixed in HeliosDB-Nano 3.58.5). Standard `test-data` can't
+  catch it because it never filters or joins on an FK column. Target-only,
+  type-agnostic (`::text` defeat), exits non-zero on a mismatch so it gates CI.
+  Validated against Sakila → stock PostgreSQL: real FK columns probed
+  (e.g. `film_category.category_id` 64 = 64 over 1,000 rows), no false alarms.
+
 ## [0.9.2] — 2026-06-24
 
 ### Fixed

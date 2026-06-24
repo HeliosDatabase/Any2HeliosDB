@@ -171,6 +171,64 @@ def _target_rows(
     return target.query(sql)
 
 
+def run_test_index(
+    target: TargetDriver, table: Table, preserve_case: bool = False,
+) -> ValidationResult:
+    """TEST_INDEX: target-side index sanity for foreign-key columns.
+
+    For each FK column it compares an **index-eligible** equality count
+    (``WHERE col = (SELECT min(col) …)``) against an **index-defeated** full-scan
+    count (``WHERE col::text = (…)::text``). The two must agree; a mismatch means
+    the target answered the equality lookup from a stale/empty index — e.g. an FK
+    index that was auto-created by ``ADD FOREIGN KEY`` but not backfilled from the
+    rows loaded *before* the FK was added (a2h's load-then-add-FK order). Standard
+    row-by-row TEST_DATA can't catch this because it never filters or joins on an
+    FK column, so this check exists specifically to spot that class of silent,
+    target-side index-correctness regression. Target-only (no source needed); the
+    ``::text`` defeat keeps it type-agnostic for numeric / text / etc. FK columns.
+    """
+    result = ValidationResult(validation_type=ValidationType.TEST_INDEX)
+    tname = _table(table, preserve_case)
+    fk_cols: List[str] = []
+    seen = set()
+    for fk in (table.foreign_keys or []):
+        for col in fk.columns:
+            if col not in seen:
+                seen.add(col)
+                fk_cols.append(col)
+    checks = 0
+    for col in fk_cols:
+        qc = _ident(col, preserve_case)
+        sql = (
+            "SELECT "
+            "(SELECT count(*) FROM {t} WHERE {c} = (SELECT min({c}) FROM {t})), "
+            "(SELECT count(*) FROM {t} WHERE {c}::text = (SELECT min({c}) FROM {t})::text), "
+            "(SELECT count(*) FROM {t} WHERE {c} IS NOT NULL)"
+        ).format(t=tname, c=qc)
+        try:
+            rows = target.query(sql)
+        except Exception as e:  # noqa: BLE001 -- a target that can't run the probe
+            result.add_error(Severity.DEGRADED, table.fqn,
+                             "FK-index check skipped for '{}': {}".format(col, str(e)[:140]))
+            continue
+        if not rows:
+            continue
+        idx_count, scan_count, nonnull = (int(x or 0) for x in rows[0])
+        if nonnull == 0:
+            continue  # no non-null FK values to probe
+        checks += 1
+        if idx_count != scan_count:
+            result.add_error(
+                Severity.BLOCKER, table.fqn,
+                "FK column '{}': indexed lookup returned {} row(s) for the sample key "
+                "but a full scan returned {} — the target served the lookup from a "
+                "stale index (FK index not backfilled?).".format(col, idx_count, scan_count))
+    result.metrics["fk_columns_checked"] = checks
+    result.metrics["mismatches"] = sum(
+        1 for e in result.errors if e.severity is Severity.BLOCKER)
+    return result
+
+
 def run_test_data(
     source: SourceAdapter,
     target: TargetDriver,

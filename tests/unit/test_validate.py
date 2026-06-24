@@ -8,7 +8,8 @@ the same single source of truth the loader and validators use, so the fakes
 cannot drift from production behavior.
 """
 from any2heliosdb.constants import Severity
-from any2heliosdb.core.catalog_model import Column, DataType, PrimaryKey, Schema, Table
+from any2heliosdb.core.catalog_model import (
+    Column, DataType, ForeignKey, PrimaryKey, Schema, Table)
 from any2heliosdb.validate import (
     ValidationResult,
     ValidationType,
@@ -91,6 +92,61 @@ def test_passed_true_with_only_nonblocker_findings():
     r.add_error(Severity.DEGRADED, "hr.log", "heuristic only")
     assert r.passed is True
     assert len(r.errors) == 2
+
+
+# --- TEST_INDEX (FK-index sanity) -------------------------------------------
+def _fk_table() -> Table:
+    return Table(
+        name="FC", schema="HR",
+        columns=[Column("FILM_ID", DataType.decimal(10, 0)),
+                 Column("CAT_ID", DataType.decimal(10, 0))],
+        primary_key=PrimaryKey(columns=["FILM_ID", "CAT_ID"]),
+        foreign_keys=[ForeignKey(columns=["CAT_ID"], references_table="CAT",
+                                 references_columns=["ID"])],
+    )
+
+
+class _IndexProbeTarget:
+    """Returns one fixed (indexed, scanned, nonnull) triple for the FK-index probe."""
+
+    def __init__(self, triple):
+        self._triple = triple
+        self.queries = []
+
+    def query(self, sql, params=None):
+        self.queries.append(sql)
+        return [self._triple]
+
+
+def test_test_index_passes_when_index_agrees_with_full_scan():
+    from any2heliosdb.validate.data import run_test_index
+
+    tgt = _IndexProbeTarget((149, 149, 1000))      # indexed == scanned
+    res = run_test_index(tgt, _fk_table())
+    assert res.passed
+    assert res.metrics["fk_columns_checked"] == 1
+    assert res.metrics["mismatches"] == 0
+    # the probe defeats the FK-column index with a ::text full scan
+    assert any("::text" in q and "cat_id" in q.lower() for q in tgt.queries)
+
+
+def test_test_index_fails_when_indexed_lookup_returns_too_few_rows():
+    from any2heliosdb.validate.data import run_test_index
+
+    tgt = _IndexProbeTarget((0, 149, 1000))        # stale FK index: 0 vs 149
+    res = run_test_index(tgt, _fk_table())
+    assert not res.passed                           # BLOCKER finding
+    assert res.metrics["mismatches"] == 1
+    assert "FK column 'CAT_ID'" in res.errors[0].message
+
+
+def test_test_index_noop_without_fks_or_nonnull_values():
+    from any2heliosdb.validate.data import run_test_index
+
+    res1 = run_test_index(_IndexProbeTarget((0, 0, 0)), _emp_table())    # no FKs
+    assert res1.passed and res1.metrics["fk_columns_checked"] == 0
+    res2 = run_test_index(_IndexProbeTarget((0, 0, 0)), _fk_table())     # FK, no values
+    assert res2.passed and res2.metrics["fk_columns_checked"] == 0
 
 
 def test_passed_false_when_a_blocker_is_present():

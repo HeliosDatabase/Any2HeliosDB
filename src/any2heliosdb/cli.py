@@ -295,6 +295,27 @@ def test_data(
 
 
 @app.command()
+def test_index(config: str = CONFIG_OPT) -> None:
+    """TEST_INDEX: target-side FK-index sanity (catches a stale/unbackfilled FK index)."""
+    from .config.store import build_source_adapter, build_target_driver, load_config
+    from .validate.data import run_test_index
+
+    cfg = load_config(config)
+    src = build_source_adapter(cfg); tgt = build_target_driver(cfg)
+    src.connect(); tgt.connect()
+    failed = False
+    try:
+        # The source schema supplies the FK metadata; the probe runs on the target.
+        for t in src.introspect_schema(cfg.source.schema).tables:
+            res = run_test_index(tgt, t, preserve_case=cfg.options.preserve_case)
+            _print_validation(res)
+            failed = failed or not res.passed
+        raise typer.Exit(1 if failed else 0)
+    finally:
+        src.close(); tgt.close()
+
+
+@app.command()
 def report(config: str = CONFIG_OPT, output: Optional[str] = typer.Option(None, "--output", "-o")) -> None:
     """Render the migration assessment report (alias of `assess`)."""
     assess(config=config, fmt="text", output=output)

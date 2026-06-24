@@ -24,6 +24,7 @@ class ValidationType(str, Enum):
     TEST = "TEST"
     TEST_COUNT = "TEST_COUNT"
     TEST_DATA = "TEST_DATA"
+    TEST_INDEX = "TEST_INDEX"
 
 
 @dataclass
