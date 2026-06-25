@@ -156,6 +156,34 @@ class NativeOracleDriver(TargetDriver):
         binds = ", ".join(":{}".format(i + 1) for i in range(len(columns)))
         return "INSERT INTO {} ({}) VALUES ({})".format(_oq(target_table), cols, binds)
 
+    def _bind_timestamps(self, cur, columns, rows) -> None:  # type: ignore[no-untyped-def]
+        """Force datetime binds to TIMESTAMP so fractional seconds survive.
+
+        python-oracledb defaults a ``datetime`` bind to ``DB_TYPE_DATE`` (the
+        7-byte Oracle date, no fractional seconds), which silently truncates
+        sub-second precision *client-side* before it ever reaches HeliosDB. The
+        type map sends both Oracle DATE and TIMESTAMP to a TIMESTAMP column, so
+        bind every datetime position as ``DB_TYPE_TIMESTAMP``; other positions
+        keep oracledb's own inference (``None``).
+        """
+        import datetime as _dt
+        import oracledb
+
+        sizes: list = []
+        any_ts = False
+        for i in range(len(columns)):
+            kind = None
+            for r in rows:
+                v = r[i]
+                if v is not None:
+                    if isinstance(v, _dt.datetime):
+                        kind = oracledb.DB_TYPE_TIMESTAMP
+                        any_ts = True
+                    break
+            sizes.append(kind)
+        if any_ts:
+            cur.setinputsizes(*sizes)
+
     def insert_rows(
         self,
         target_table: str,
@@ -166,6 +194,7 @@ class NativeOracleDriver(TargetDriver):
         materialized = [tuple(r) for r in rows]
         if materialized:
             with self.conn.cursor() as cur:
+                self._bind_timestamps(cur, columns, materialized)
                 cur.executemany(self._insert_sql(target_table, columns), materialized)
             self.conn.commit()
         return len(materialized)
@@ -183,6 +212,7 @@ class NativeOracleDriver(TargetDriver):
             cur.execute("DELETE FROM {}{}".format(
                 _oq(target_table), " WHERE {}".format(where) if where else ""))
             if materialized:
+                self._bind_timestamps(cur, columns, materialized)
                 cur.executemany(self._insert_sql(target_table, columns), materialized)
         self.conn.commit()
         return len(materialized)
@@ -207,7 +237,9 @@ class NativeOracleDriver(TargetDriver):
         delete = "DELETE FROM {} WHERE {}".format(_oq(target_table), where)
         with self.conn.cursor() as cur:
             cur.executemany(delete, list(by_key.keys()))
-            cur.executemany(self._insert_sql(target_table, columns), list(by_key.values()))
+            values = list(by_key.values())
+            self._bind_timestamps(cur, columns, values)
+            cur.executemany(self._insert_sql(target_table, columns), values)
         self.conn.commit()
         return len(by_key)
 
