@@ -171,21 +171,42 @@ def _target_rows(
     return target.query(sql)
 
 
+def _sql_literal(v: object) -> Optional[str]:
+    """Render a sampled value as a portable SQL literal, or None to skip it.
+
+    Conservative on purpose: only plain numbers and strings render (the common FK
+    types). Anything else (bool, bytes, datetime, None, ...) returns None so the
+    caller SKIPS that column rather than risk a wrong comparison — a validator must
+    never false-fail.
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float, Decimal)):
+        return str(v)
+    if isinstance(v, str):
+        return "'" + v.replace("'", "''") + "'"
+    return None
+
+
 def run_test_index(
     target: TargetDriver, table: Table, preserve_case: bool = False,
 ) -> ValidationResult:
     """TEST_INDEX: target-side index sanity for foreign-key columns.
 
-    For each FK column it compares an **index-eligible** equality count
-    (``WHERE col = (SELECT min(col) …)``) against an **index-defeated** full-scan
-    count (``WHERE col::text = (…)::text``). The two must agree; a mismatch means
-    the target answered the equality lookup from a stale/empty index — e.g. an FK
-    index that was auto-created by ``ADD FOREIGN KEY`` but not backfilled from the
-    rows loaded *before* the FK was added (a2h's load-then-add-FK order). Standard
-    row-by-row TEST_DATA can't catch this because it never filters or joins on an
-    FK column, so this check exists specifically to spot that class of silent,
-    target-side index-correctness regression. Target-only (no source needed); the
-    ``::text`` defeat keeps it type-agnostic for numeric / text / etc. FK columns.
+    For each FK column it takes the per-value row counts from a ``GROUP BY`` (which
+    the target answers by scanning/aggregating, **not** the point-lookup index) as
+    ground truth, then runs an **index-eligible** equality lookup for the most
+    common value and checks the two agree. A shortfall means the equality was
+    answered from a stale/empty index — e.g. an FK index auto-created by ``ADD
+    FOREIGN KEY`` but never backfilled from the rows loaded *before* the FK was
+    added (a2h loads data first, adds FKs after). Standard row-by-row TEST_DATA
+    can't catch this because it never filters or joins on an FK column.
+
+    Portable + fail-safe: only ``GROUP BY`` and a plain equality on a rendered
+    literal (no casts, no nested scalar subqueries that some targets reject, no
+    bind params), and it NEVER reports a mismatch unless it has two valid,
+    comparable counts — a column whose sample value can't be rendered or whose
+    probe errors is skipped (DEGRADED), not failed. Target-only (no source needed).
     """
     result = ValidationResult(validation_type=ValidationType.TEST_INDEX)
     tname = _table(table, preserve_case)
@@ -199,30 +220,35 @@ def run_test_index(
     checks = 0
     for col in fk_cols:
         qc = _ident(col, preserve_case)
-        sql = (
-            "SELECT "
-            "(SELECT count(*) FROM {t} WHERE {c} = (SELECT min({c}) FROM {t})), "
-            "(SELECT count(*) FROM {t} WHERE {c}::text = (SELECT min({c}) FROM {t})::text), "
-            "(SELECT count(*) FROM {t} WHERE {c} IS NOT NULL)"
-        ).format(t=tname, c=qc)
         try:
-            rows = target.query(sql)
+            truth = target.query(
+                "SELECT {c}, count(*) FROM {t} WHERE {c} IS NOT NULL "
+                "GROUP BY {c} ORDER BY count(*) DESC".format(c=qc, t=tname))
         except Exception as e:  # noqa: BLE001 -- a target that can't run the probe
             result.add_error(Severity.DEGRADED, table.fqn,
                              "FK-index check skipped for '{}': {}".format(col, str(e)[:140]))
             continue
-        if not rows:
+        if not truth:
+            continue                       # no non-null values to probe
+        sample_val, true_count = truth[0][0], int(truth[0][1])
+        lit = _sql_literal(sample_val)
+        if lit is None:
+            continue                       # unrenderable sample value -> skip (fail-safe)
+        try:
+            r = target.query("SELECT count(*) FROM {t} WHERE {c} = {v}".format(t=tname, c=qc, v=lit))
+        except Exception as e:  # noqa: BLE001
+            result.add_error(Severity.DEGRADED, table.fqn,
+                             "FK-index check skipped for '{}': {}".format(col, str(e)[:140]))
             continue
-        idx_count, scan_count, nonnull = (int(x or 0) for x in rows[0])
-        if nonnull == 0:
-            continue  # no non-null FK values to probe
+        idx_count = int(r[0][0] or 0) if r and r[0] else 0
         checks += 1
-        if idx_count != scan_count:
+        if idx_count != true_count:
             result.add_error(
                 Severity.BLOCKER, table.fqn,
-                "FK column '{}': indexed lookup returned {} row(s) for the sample key "
-                "but a full scan returned {} — the target served the lookup from a "
-                "stale index (FK index not backfilled?).".format(col, idx_count, scan_count))
+                "FK column '{}': an index-eligible lookup for the most common value "
+                "returned {} row(s) but the true (GROUP BY) count is {} — the target "
+                "likely served it from a stale index (FK index not backfilled?).".format(
+                    col, idx_count, true_count))
     result.metrics["fk_columns_checked"] = checks
     result.metrics["mismatches"] = sum(
         1 for e in result.errors if e.severity is Severity.BLOCKER)
