@@ -107,46 +107,68 @@ def _fk_table() -> Table:
 
 
 class _IndexProbeTarget:
-    """Returns one fixed (indexed, scanned, nonnull) triple for the FK-index probe."""
+    """Fake target for the GROUP-BY-ground-truth FK-index check.
 
-    def __init__(self, triple):
-        self._triple = triple
+    ``truth`` = the GROUP BY result rows ``[(value, count), ...]``;
+    ``indexed`` = the count the index-eligible equality lookup returns.
+    """
+
+    def __init__(self, truth, indexed=0):
+        self._truth = truth
+        self._indexed = indexed
         self.queries = []
 
     def query(self, sql, params=None):
         self.queries.append(sql)
-        return [self._triple]
+        if "group by" in sql.lower():
+            return list(self._truth)
+        return [(self._indexed,)]
 
 
-def test_test_index_passes_when_index_agrees_with_full_scan():
+def test_test_index_passes_when_index_matches_group_by_truth():
     from any2heliosdb.validate.data import run_test_index
 
-    tgt = _IndexProbeTarget((149, 149, 1000))      # indexed == scanned
+    tgt = _IndexProbeTarget(truth=[(10, 3), (20, 2)], indexed=3)   # matches the most-common value
     res = run_test_index(tgt, _fk_table())
     assert res.passed
     assert res.metrics["fk_columns_checked"] == 1
     assert res.metrics["mismatches"] == 0
-    # the probe defeats the FK-column index with a ::text full scan
-    assert any("::text" in q and "cat_id" in q.lower() for q in tgt.queries)
+    # ground truth comes from a GROUP BY (portable; no cast / nested subquery)
+    assert any("group by" in q.lower() and "cat_id" in q.lower() for q in tgt.queries)
 
 
-def test_test_index_fails_when_indexed_lookup_returns_too_few_rows():
+def test_test_index_fails_when_indexed_lookup_short_of_truth():
     from any2heliosdb.validate.data import run_test_index
 
-    tgt = _IndexProbeTarget((0, 149, 1000))        # stale FK index: 0 vs 149
+    tgt = _IndexProbeTarget(truth=[(10, 3)], indexed=0)            # stale index: 0 vs true 3
     res = run_test_index(tgt, _fk_table())
-    assert not res.passed                           # BLOCKER finding
+    assert not res.passed                                          # BLOCKER finding
     assert res.metrics["mismatches"] == 1
     assert "FK column 'CAT_ID'" in res.errors[0].message
 
 
-def test_test_index_noop_without_fks_or_nonnull_values():
+def test_test_index_noop_without_fks_or_values():
     from any2heliosdb.validate.data import run_test_index
 
-    res1 = run_test_index(_IndexProbeTarget((0, 0, 0)), _emp_table())    # no FKs
+    res1 = run_test_index(_IndexProbeTarget(truth=[]), _emp_table())   # no FK columns
     assert res1.passed and res1.metrics["fk_columns_checked"] == 0
-    res2 = run_test_index(_IndexProbeTarget((0, 0, 0)), _fk_table())     # FK, no values
+    res2 = run_test_index(_IndexProbeTarget(truth=[]), _fk_table())    # FK present, no rows
     assert res2.passed and res2.metrics["fk_columns_checked"] == 0
+
+
+def test_test_index_failsafe_skips_on_probe_error():
+    # The Nano regression: a target that can't evaluate the probe must DEGRADE
+    # (skip), never produce a false BLOCKER.
+    from any2heliosdb.validate.data import run_test_index
+
+    class _Err:
+        def query(self, sql, params=None):
+            raise RuntimeError("scalar subquery reached the evaluator without materialisation")
+
+    res = run_test_index(_Err(), _fk_table())
+    assert res.passed                                              # no false failure
+    assert res.metrics["fk_columns_checked"] == 0
+    assert res.metrics["mismatches"] == 0
 
 
 def test_passed_false_when_a_blocker_is_present():

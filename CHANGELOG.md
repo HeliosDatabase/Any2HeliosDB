@@ -3,6 +3,21 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **`a2h test-index` false positive on HeliosDB-Nano** (and any target that can't
+  evaluate a nested scalar subquery with a cast). The check compared an
+  index-eligible count against an index-defeated
+  `col::text = (SELECT min(col))::text` count, but Nano can't materialise that
+  nested cast-subquery and returned NULL — which the check misread as a mismatch
+  (it reported a stale FK index where none existed). Rewritten to a portable,
+  fail-safe form: ground-truth per-value counts come from a `GROUP BY` (no cast,
+  no nested subquery, no bind params), and the most-common value's true count is
+  compared against an index-eligible equality lookup; a column whose probe errors
+  or whose sample value can't be rendered is skipped (DEGRADED), never failed.
+  Validated: Oracle → HeliosDB-Nano 3.58.5 and Oracle → stock PostgreSQL both clean.
+
 ## [0.9.3] — 2026-06-24
 
 ### Added
