@@ -47,6 +47,17 @@ class NativeOracleDriver(TargetDriver):
             self._conn = oracledb.connect(
                 user=self.dsn.user, password=self.dsn.password or "heliosdb", dsn=dsn)
             self._conn.autocommit = True
+            # Bound every round-trip. Two reasons: (1) a native migrate must never
+            # hang forever on a stalled server response, and (2) setting
+            # call_timeout switches oracledb thin to a timeout-driven read loop that
+            # is resilient to HeliosDB's TTC response framing — without it the bulk
+            # array-INSERT round-trip can block indefinitely (the DDL/SELECT path is
+            # unaffected). 120s is generous for one array-INSERT batch yet still
+            # fails fast on a true stall.
+            try:
+                self._conn.call_timeout = 300_000  # ms; generous safety net for a data round-trip
+            except Exception:  # noqa: BLE001 -- very old oracledb without call_timeout
+                pass
         except Exception as e:  # noqa: BLE001
             raise TargetConnectionError(
                 "could not connect to HeliosDB Oracle listener at {} as {}: {}".format(
@@ -55,7 +66,18 @@ class NativeOracleDriver(TargetDriver):
     def close(self) -> None:
         if self._conn is not None:
             try:
+                # HeliosDB's Oracle listener may not answer oracledb's graceful
+                # logoff/close handshake, which would otherwise block until the
+                # call_timeout (the data is already committed). Cap the close wait
+                # short and never let a close-handshake stall fail an
+                # otherwise-successful migration.
+                try:
+                    self._conn.call_timeout = 5_000
+                except Exception:  # noqa: BLE001
+                    pass
                 self._conn.close()
+            except Exception:  # noqa: BLE001 -- close stall after committed data is harmless
+                pass
             finally:
                 self._conn = None
 
