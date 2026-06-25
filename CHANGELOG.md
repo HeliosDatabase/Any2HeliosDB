@@ -3,9 +3,27 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.9.4] — 2026-06-25
 
 ### Fixed
+- **Native (Oracle-wire) target: a successful migration could hang on close.**
+  After a native `migrate` finished and committed, the driver's `close()` blocked
+  in oracledb's `Protocol._reset` because HeliosDB-Full does not answer the
+  graceful logoff/close handshake — the data was already persisted, but the run
+  never returned. `close()` is now best-effort (caps the close wait at 5s and
+  swallows close-handshake errors), and `connect()` sets a generous per-call
+  timeout (300s) so a stalled bulk array-INSERT round-trip fails fast rather than
+  blocking forever. A native Oracle → HeliosDB-Full migrate now completes.
+- **Validators read zero rows from a native (Oracle-wire) target.** The native
+  path keeps source-case identifiers (e.g. `"DEPARTMENTS"`), but `test-count` /
+  `test-data` / `test-index` folded names to lowercase and queried a wrong-cased
+  relation, reporting an empty target that in fact held the data. They now derive
+  the effective identifier case the same way the migration does
+  (`keep_source_case = preserve_case OR oracle-dialect`), rendering names exactly
+  as the migration created them. TEST_COUNT and TEST_INDEX now pass on a native
+  Oracle → HeliosDB-Full migrate. (TEST_DATA on DATE/TIMESTAMP/RAW columns is
+  gated on a HeliosDB-Full TTC read-path type-tagging fix, tracked separately —
+  the data is stored correctly; only the read-back column metadata is wrong.)
 - **`a2h test-index` false positive on HeliosDB-Nano** (and any target that can't
   evaluate a nested scalar subquery with a cast). The check compared an
   index-eligible count against an index-defeated
