@@ -13,6 +13,7 @@ the column's already-resolved ``data_type`` is used.
 """
 from __future__ import annotations
 
+import re
 from typing import List, Optional
 
 from ..core.catalog_model import (
@@ -58,6 +59,14 @@ def render_create_table(
     return "CREATE TABLE {} (\n{}\n);".format(ident(table.name, preserve_case), body)
 
 
+# Oracle sequence default: `[schema.]seq.NEXTVAL` (optionally quoted). The captured
+# group is the sequence identifier immediately before .NEXTVAL (schema prefix and
+# quotes dropped).
+_ORA_NEXTVAL = re.compile(
+    r'^(?:"?[A-Za-z0-9_$#]+"?\s*\.\s*)?"?([A-Za-z0-9_$#]+)"?\s*\.\s*NEXTVAL\s*$',
+    re.IGNORECASE)
+
+
 def _translate_default(default: str, data_type: Optional[DataType] = None) -> str:
     d = default.strip()
     up = d.upper()
@@ -66,6 +75,12 @@ def _translate_default(default: str, data_type: Optional[DataType] = None) -> st
         return "CURRENT_TIMESTAMP"
     if up in ("SYS_GUID()", "SYS_GUID"):
         return "gen_random_uuid()"
+    # Oracle `[schema.]seq.NEXTVAL` -> nextval('seq'). The seq name is lowercased
+    # to match how CREATE SEQUENCE renders it under the default (preserve_case off);
+    # without this, PG/Nano reject a verbatim `DEFAULT SEQ.NEXTVAL`.
+    m = _ORA_NEXTVAL.match(d)
+    if m:
+        return "nextval('{}')".format(m.group(1).lower())
     # A BOOLEAN column's numeric/string default (MySQL TINYINT(1) DEFAULT 1/0,
     # or '1'/'0', b'1') must be a boolean literal — strict PostgreSQL rejects
     # `boolean DEFAULT 1` (HeliosDB accepts it, which masked this).

@@ -38,12 +38,16 @@ class FakeConn:
         self.log = []
         self.autocommit = True
         self.commits = 0
+        self.rollbacks = 0
 
     def cursor(self):
         return FakeCursor(self)
 
     def commit(self):
         self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
 
 
 def _drv():
@@ -90,6 +94,61 @@ def test_delete_keys_oracle_binds():
     assert n == 2
     kind, sql, rows = d._conn.log[-1]
     assert sql == 'DELETE FROM "EMPLOYEES" WHERE "EMP_ID" = :1' and rows == [(1,), (2,)]
+
+
+def test_load_range_atomic_commits_once_and_restores_autocommit():
+    d = _drv()
+    assert d._conn.autocommit is True
+    d.load_range("EMPLOYEES", ["EMP_ID", "FULL_NAME"], [(1, "Ada")],
+                 where='"EMP_ID" >= 1 AND "EMP_ID" < 3')
+    # DELETE+INSERT committed exactly once, never rolled back, autocommit restored.
+    assert d._conn.commits == 1
+    assert d._conn.rollbacks == 0
+    assert d._conn.autocommit is True
+
+
+def test_load_range_rolls_back_and_does_not_commit_on_insert_failure():
+    d = _drv()
+
+    class BoomCursor(FakeCursor):
+        def executemany(self, sql, rows):  # INSERT blows up after the DELETE
+            raise RuntimeError("insert failed")
+
+    d._conn.cursor = lambda: BoomCursor(d._conn)
+    with pytest.raises(RuntimeError, match="insert failed"):
+        d.load_range("EMPLOYEES", ["EMP_ID", "FULL_NAME"], [(1, "Ada")], where='"EMP_ID" >= 1')
+    # No commit (DELETE must not survive), the transaction was rolled back,
+    # and the connection's autocommit state is restored for the next op.
+    assert d._conn.commits == 0
+    assert d._conn.rollbacks == 1
+    assert d._conn.autocommit is True
+
+
+def test_upsert_atomic_commits_once_and_restores_autocommit():
+    d = _drv()
+    d.upsert("EMPLOYEES", ["EMP_ID"], ["EMP_ID", "FULL_NAME"], [(1, "new"), (2, "x")])
+    assert d._conn.commits == 1
+    assert d._conn.rollbacks == 0
+    assert d._conn.autocommit is True
+
+
+def test_upsert_rolls_back_on_insert_failure():
+    d = _drv()
+    calls = {"n": 0}
+
+    class BoomOnInsertCursor(FakeCursor):
+        def executemany(self, sql, rows):
+            calls["n"] += 1
+            if "INSERT" in sql:  # let the DELETE through, fail the re-insert
+                raise RuntimeError("insert failed")
+            super().executemany(sql, rows)
+
+    d._conn.cursor = lambda: BoomOnInsertCursor(d._conn)
+    with pytest.raises(RuntimeError, match="insert failed"):
+        d.upsert("EMPLOYEES", ["EMP_ID"], ["EMP_ID", "FULL_NAME"], [(1, "new")])
+    assert d._conn.commits == 0
+    assert d._conn.rollbacks == 1
+    assert d._conn.autocommit is True
 
 
 def test_describe_columns_from_cursor_description():
