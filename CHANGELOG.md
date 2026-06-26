@@ -3,7 +3,7 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.9.5] — 2026-06-26
 
 ### Added
 - **PostgreSQL-source sequence migration.** The PG source adapter now
