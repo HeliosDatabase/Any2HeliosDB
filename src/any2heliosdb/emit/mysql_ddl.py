@@ -135,7 +135,8 @@ def render_create_table(
         piece = "  {} {}".format(_ident(col.name, preserve_case), coltype)
         if not col.nullable:
             piece += " NOT NULL"
-        if col.default is not None:
+        # Skip a PG nextval() default: MySQL uses AUTO_INCREMENT, not nextval().
+        if col.default is not None and not col.default.strip().upper().startswith("NEXTVAL("):
             d = _translate_default(col.default)
             # CURRENT_TIMESTAMP is only valid as a default on DATETIME/TIMESTAMP.
             if d is not None and not (

@@ -86,6 +86,10 @@ def render_sequence(seq: Sequence, preserve_case: bool = False) -> str:
         parts.append("MINVALUE {}".format(seq.min_value))
     if seq.max_value is not None and seq.max_value < 10**27:
         parts.append("MAXVALUE {}".format(seq.max_value))
+    if seq.cache and seq.cache > 1:
+        # Carry the source cache size so the target's cached-block allocator
+        # reserves the right number of values per fsync (scalable nextval).
+        parts.append("CACHE {}".format(seq.cache))
     if seq.cycle:
         parts.append("CYCLE")
     return " ".join(parts) + ";"

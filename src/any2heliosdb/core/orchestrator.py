@@ -217,9 +217,10 @@ def migrate(
                             "DROP SEQUENCE IF EXISTS {}".format(qtable(tname(seq.name))))
                     except Exception:  # noqa: BLE001
                         break
-        for t in src.tables:
-            target.execute(render_table(t))
-            stats.tables += 1
+        # Sequences BEFORE tables: a PG-source column may carry a
+        # ``DEFAULT nextval('seq')`` that the target resolves at CREATE TABLE
+        # time, so the sequence must already exist. (Plain CREATE SEQUENCE has no
+        # table dependency, so this order is safe for every dialect.)
         for seq in src.sequences:
             stmt = render_seq(seq)
             if not stmt:
@@ -228,6 +229,9 @@ def migrate(
                 target.execute(stmt)
             except Exception as e:  # noqa: BLE001
                 stats.warnings.append("sequence {}: {}".format(seq.name, e))
+        for t in src.tables:
+            target.execute(render_table(t))
+            stats.tables += 1
         seen_idx: set = set()
         for t in src.tables:
             for idx in t.indexes:
