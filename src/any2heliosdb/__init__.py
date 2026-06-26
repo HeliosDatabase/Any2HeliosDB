@@ -12,5 +12,5 @@ actually open connections, so the pure-logic layers stay unit-testable without
 the drivers installed.
 """
 
-__version__ = "0.9.4"
+__version__ = "0.9.5"
 __all__ = ["__version__"]
