@@ -10,9 +10,12 @@ overrides.
 """
 from __future__ import annotations
 
+import logging
 import math
 import re
 from typing import Iterator, List, Optional, Sequence, Tuple
+
+_LOG = logging.getLogger("any2heliosdb.sources.oracle")
 
 from ...constants import SourceDialect
 from ...core.catalog_model import (
@@ -150,6 +153,9 @@ class OracleAdapter(SourceAdapter):
             return self._q1(build(self._as_of()))
         except Exception as e:  # noqa: BLE001
             if self._snapshot_scn and _is_flashback_error(e):
+                _LOG.warning("AS OF SCN %s read failed (%s); falling back to a current "
+                             "read — read-consistency is not guaranteed for this object",
+                             self._snapshot_scn, str(e).splitlines()[0][:90])
                 return self._q1(build(""))
             raise
 
@@ -488,6 +494,10 @@ class OracleAdapter(SourceAdapter):
                 # (ORA-01466); fall back to a current read for this table.
                 if not (self._snapshot_scn and _is_flashback_error(e)):
                     raise
+                _LOG.warning("AS OF SCN %s read of %s failed (%s); falling back to a "
+                             "current read — read-consistency not guaranteed for this table",
+                             self._snapshot_scn, quote_oracle(owner, table.name),
+                             str(e).splitlines()[0][:90])
                 cur.execute(base + tail)
             while True:
                 batch = cur.fetchmany(arraysize)
