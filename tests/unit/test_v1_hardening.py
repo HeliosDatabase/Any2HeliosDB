@@ -34,6 +34,42 @@ def test_translate_default_preserves_non_nextval():
     assert ddl._translate_default("'NEXTVAL'") == "'NEXTVAL'"
 
 
+def test_nextval_default_is_preserve_case_aware():
+    # CODEX round-2 #55: the nextval seq name must match render_sequence()'s casing.
+    assert ddl._translate_default('"HR"."EMP_SEQ"."NEXTVAL"', None, False) == "nextval('emp_seq')"
+    assert ddl._translate_default('"HR"."EMP_SEQ"."NEXTVAL"', None, True) == "nextval('\"EMP_SEQ\"')"
+    # the rendered seq name matches what render_sequence emits under the same flag
+    from any2heliosdb.core.catalog_model import Sequence
+    for pc in (False, True):
+        seq_ddl = ddl.render_sequence(Sequence(name="EMP_SEQ", start=1), preserve_case=pc)
+        nm = seq_ddl.split("CREATE SEQUENCE ", 1)[1].split()[0]
+        assert "nextval('{}')".format(nm) == ddl._translate_default('"EMP_SEQ"."NEXTVAL"', None, pc)
+
+
+# --- #56 (round 2): chunk SOURCE predicate also doubles an embedded quote ---
+def test_chunk_source_where_doubles_quote():
+    from any2heliosdb.chunking.pk_range import Chunk
+    from any2heliosdb.core.catalog_model import Table
+    w = Chunk(table=Table(name="t"), chunk_id="c", pk_col='a"b', lo=1, hi=5).source_where()
+    assert '"a""b"' in w and "a\"b\" >=" not in w  # doubled, never a lone quote
+
+
+# --- #54 (round 2): snapshot decision sentinel (no recapture on resume) ---
+def test_manifest_snapshot_decided(tmp_path):
+    from any2heliosdb.core.manifest import Manifest
+    m = Manifest(str(tmp_path / "m.db"))
+    try:
+        m.start_run("r1")
+        assert m.snapshot_decided("r1") is False
+        m.set_snapshot("r1", None)            # "no snapshot available" decision recorded
+        assert m.snapshot_decided("r1") is True
+        assert m.get_snapshot("r1") is None    # empty value, but the decision persists
+        m.set_snapshot("r1", "999")
+        assert m.get_snapshot("r1") == "999"
+    finally:
+        m.close()
+
+
 # --- #56: Oracle identifier quoting doubles an embedded double-quote --------
 def test_oid_doubles_embedded_quote():
     assert _oid("abc") == '"abc"'

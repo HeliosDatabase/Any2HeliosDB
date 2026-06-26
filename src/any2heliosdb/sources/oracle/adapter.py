@@ -80,7 +80,18 @@ def quote_oracle(owner: str, name: str) -> str:
 # the exact single-column form `"COL" IS NOT NULL`; that one is already modeled on
 # the column, so it's the ONLY check we drop. A real multi-term CHECK that merely
 # ends with IS NOT NULL (e.g. `email IS NULL OR phone IS NOT NULL`) is preserved.
-_GENERATED_NOTNULL = re.compile(r'^"?[A-Za-z0-9_$#]+"?\s+IS\s+NOT\s+NULL$', re.IGNORECASE)
+_GENERATED_NOTNULL = re.compile(r'^"?([A-Za-z0-9_$#]+)"?\s+IS\s+NOT\s+NULL$', re.IGNORECASE)
+
+# An `AS OF SCN` read fails if the snapshot predates a table's DDL (ORA-01466
+# "table definition has changed") or falls outside the undo window; on these the
+# adapter falls back to a current read for that query (read-consistency for that
+# table is then unavailable — fine for the common stable/quiesced source).
+_FLASHBACK_ERR_CODES = ("ORA-01466", "ORA-08180", "ORA-08181", "ORA-30052")
+
+
+def _is_flashback_error(exc: object) -> bool:
+    s = str(exc)
+    return any(code in s for code in _FLASHBACK_ERR_CODES)
 
 
 class OracleAdapter(SourceAdapter):
@@ -130,6 +141,17 @@ class OracleAdapter(SourceAdapter):
         with self.conn.cursor() as cur:
             cur.execute(sql, binds)
             return cur.fetchall()
+
+    def _q1_consistent(self, build):  # type: ignore[no-untyped-def]
+        """Run a single-row read that uses the snapshot, falling back to a current
+        read on a flashback error. ``build(as_of_clause)`` returns the SQL given an
+        ``AS OF SCN n`` (or empty) clause."""
+        try:
+            return self._q1(build(self._as_of()))
+        except Exception as e:  # noqa: BLE001
+            if self._snapshot_scn and _is_flashback_error(e):
+                return self._q1(build(""))
+            raise
 
     def server_version(self) -> str:
         return str(self.conn.version)
@@ -265,16 +287,22 @@ class OracleAdapter(SourceAdapter):
                 name=cname, columns=local, references_table=rtable, references_columns=ref,
             ))
 
+        notnull_cols = {c.name.upper() for c in cols if not c.nullable}
         constraints: List[Constraint] = []
         for (cname, cond) in self._qall(
             "SELECT constraint_name, search_condition_vc FROM all_constraints "
             "WHERE owner=:o AND table_name=:t AND constraint_type='C'", o=owner, t=name,
         ):
             text = (cond or "").strip()
-            # Skip ONLY a system-generated single-column NOT NULL check (already
-            # modeled on the column); a real multi-term CHECK that merely ends with
-            # IS NOT NULL (e.g. `email IS NULL OR phone IS NOT NULL`) is preserved.
-            if not text or _GENERATED_NOTNULL.match(text):
+            if not text:
+                continue
+            # Drop ONLY a single-column `<col> IS NOT NULL` check whose column is in
+            # fact NOT NULL — that's Oracle's system-generated NOT NULL check, already
+            # modeled on the column. A multi-term check (e.g. `email IS NULL OR phone
+            # IS NOT NULL`) or a check on a NULLABLE column is a real user CHECK and is
+            # preserved. Uses column-nullability metadata, not the regex alone.
+            mnn = _GENERATED_NOTNULL.match(text)
+            if mnn and mnn.group(1).strip('"').upper() in notnull_cols:
                 continue
             constraints.append(Constraint(
                 constraint_type=ConstraintKind.CHECK, name=cname, expression=text,
@@ -417,16 +445,15 @@ class OracleAdapter(SourceAdapter):
     # --- extraction ------------------------------------------------------
     def exact_row_count(self, table: Table) -> int:
         owner = (table.schema or self.default_schema()).upper()
-        row = self._q1("SELECT COUNT(*) FROM {}{}".format(
-            quote_oracle(owner, table.name), self._as_of()))
+        tbl = quote_oracle(owner, table.name)
+        row = self._q1_consistent(lambda a: "SELECT COUNT(*) FROM {}{}".format(tbl, a))
         return int(row[0]) if row else 0
 
     def numeric_pk_bounds(self, table: Table, pk_col: str):  # type: ignore[no-untyped-def]
         owner = (table.schema or self.default_schema()).upper()
-        row = self._q1(
-            "SELECT MIN({c}), MAX({c}) FROM {t}{a}".format(
-                c=_oid(pk_col), t=quote_oracle(owner, table.name), a=self._as_of())
-        )
+        tbl = quote_oracle(owner, table.name)
+        row = self._q1_consistent(
+            lambda a: "SELECT MIN({c}), MAX({c}) FROM {t}{a}".format(c=_oid(pk_col), t=tbl, a=a))
         if not row or row[0] is None:
             return None
         try:
@@ -448,15 +475,20 @@ class OracleAdapter(SourceAdapter):
     ) -> Iterator[Tuple]:
         owner = (table.schema or self.default_schema()).upper()
         col_list = ", ".join(_oid(c) for c in columns)
-        sql = "SELECT {} FROM {}{}".format(
-            col_list, quote_oracle(owner, table.name), self._as_of())
-        if where:
-            sql += " WHERE {}".format(where)
+        base = "SELECT {} FROM {}".format(col_list, quote_oracle(owner, table.name))
+        tail = " WHERE {}".format(where) if where else ""
         cur = self.conn.cursor()
         cur.arraysize = arraysize
         cur.prefetchrows = arraysize + 1
         try:
-            cur.execute(sql)
+            try:
+                cur.execute(base + self._as_of() + tail)
+            except Exception as e:  # noqa: BLE001
+                # Flashback read can't see a table DDL'd after the snapshot
+                # (ORA-01466); fall back to a current read for this table.
+                if not (self._snapshot_scn and _is_flashback_error(e)):
+                    raise
+                cur.execute(base + tail)
             while True:
                 batch = cur.fetchmany(arraysize)
                 if not batch:

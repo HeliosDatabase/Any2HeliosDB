@@ -46,7 +46,8 @@ def render_create_table(
         if not col.nullable:
             piece += " NOT NULL"
         if col.default is not None:
-            piece += " DEFAULT {}".format(_translate_default(col.default, col.data_type))
+            piece += " DEFAULT {}".format(
+                _translate_default(col.default, col.data_type, preserve_case))
         lines.append(piece)
     if table.primary_key and table.primary_key.columns:
         pk = ", ".join(ident(c, preserve_case) for c in table.primary_key.columns)
@@ -71,7 +72,8 @@ _ORA_NEXTVAL = re.compile(
     re.IGNORECASE)
 
 
-def _translate_default(default: str, data_type: Optional[DataType] = None) -> str:
+def _translate_default(default: str, data_type: Optional[DataType] = None,
+                       preserve_case: bool = False) -> str:
     d = default.strip()
     up = d.upper()
     # The few always-safe Oracle->PG default rewrites.
@@ -84,7 +86,10 @@ def _translate_default(default: str, data_type: Optional[DataType] = None) -> st
     # without this, PG/Nano reject a verbatim `DEFAULT SEQ.NEXTVAL`.
     m = _ORA_NEXTVAL.match(d)
     if m:
-        return "nextval('{}')".format(m.group(1).lower())
+        # Render the sequence name exactly as render_sequence() does (ident honors
+        # preserve_case), so the column default references the sequence the DDL
+        # actually created: lowercased when preserve_case is off, quoted+cased when on.
+        return "nextval('{}')".format(ident(m.group(1), preserve_case))
     # A BOOLEAN column's numeric/string default (MySQL TINYINT(1) DEFAULT 1/0,
     # or '1'/'0', b'1') must be a boolean literal — strict PostgreSQL rejects
     # `boolean DEFAULT 1` (HeliosDB accepts it, which masked this).

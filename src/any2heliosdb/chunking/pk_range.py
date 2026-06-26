@@ -30,7 +30,12 @@ class Chunk:
     def source_where(self) -> Optional[str]:
         if self.pk_col is None:
             return None
-        return '"{c}" >= {lo} AND "{c}" < {hi}'.format(c=self.pk_col, lo=self.lo, hi=self.hi)
+        # Quote the source PK column, doubling any embedded " (the source keeps its
+        # own case, e.g. Oracle UPPER), so a column name containing a quote can't
+        # break or alter the chunked read. This predicate is appended verbatim to
+        # the source SELECT, so it must be self-safe.
+        c = '"{}"'.format(self.pk_col.replace('"', '""'))
+        return "{c} >= {lo} AND {c} < {hi}".format(c=c, lo=self.lo, hi=self.hi)
 
     def target_where(self, preserve_case: bool = False) -> Optional[str]:
         if self.pk_col is None:
