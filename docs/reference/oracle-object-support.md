@@ -28,24 +28,10 @@ writes the target DDL to `schema.sql` **and** the procedural source verbatim to
 > A `DEGRADED` gap means: the migration proceeds and the data lands correctly,
 > but that object needs a human to port it. It never blocks the run.
 
-## Roadmap — v2.0.0: PL/SQL → PL/pgSQL auto-translation (Option B)
+## Roadmap
 
-v2.0.0 will **auto-translate** the objects that v1.0.0 surfaces for review —
-turning PL/SQL procedures/functions/packages and trigger bodies into PL/pgSQL,
-and (where the target supports it) emitting `CREATE MATERIALIZED VIEW` and native
-partitioning directly. The design intent:
-
-- **Procedures / functions** → PL/pgSQL function bodies (control flow, `%TYPE`,
-  cursors, exceptions, `RETURN`), with anything genuinely non-portable still
-  routed to the review file + gap report.
-- **Packages** → a schema (namespace) of PL/pgSQL functions, package state →
-  session-local GUCs / temp structures.
-- **Triggers** → a PL/pgSQL trigger function + `CREATE TRIGGER`.
-- **Materialized views / partitioning** → native target DDL when the edition
-  supports it; gap + review otherwise.
-
-This is deliberately **out of scope for v1.0.0**: auto-translating arbitrary
-PL/SQL is a large, correctness-sensitive surface, and the thin-tool bar (migrate
-the data tier perfectly, surface the rest for review) is the safe, shippable
-1.0. The v1.0.0 introspection already captures every procedural object's
-verbatim source, so v2.0.0 builds on that foundation rather than re-reading it.
+Procedural-object **auto-translation** (PL/SQL → PL/pgSQL) and **AI-assisted
+live-rewrite** of objects that can't be translated mechanically are the v2.0.0
+goals — see **[docs/roadmap/v2.0.0.md](../roadmap/v2.0.0.md)**. v1.0.0's
+introspection already captures every procedural object's verbatim source, so
+v2.0.0 builds on that foundation rather than re-reading it.

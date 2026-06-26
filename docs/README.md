@@ -46,3 +46,14 @@ Start with the [project README](../README.md) for the tagline, install, and the
   HeliosDB minimum builds.
 - **[HeliosDB compatibility](heliosdb-compatibility.md)** — supported editions and
   minimum versions, the runtime capability probe, and graceful degradation.
+- **[Oracle object support](reference/oracle-object-support.md)** — what migrates
+  automatically vs. is surfaced for review (routines, triggers, materialized
+  views, partitioning), and the v2.0.0 auto-translation roadmap.
+
+## Roadmap
+
+- **[Roadmap](roadmap/README.md)** — what's next, including
+  **[v2.0.0 — procedural-object migration](roadmap/v2.0.0.md)**: PL/SQL → PL/pgSQL
+  auto-translation plus AI-assisted live-rewrite with on-the-fly testing, falling
+  back to a detailed refactoring-effort estimate for objects that can't be
+  migrated mechanically.
