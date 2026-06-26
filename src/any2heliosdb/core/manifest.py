@@ -128,6 +128,16 @@ class Manifest:
             "AND kind='snapshot'", (run_id,)).fetchone()
         return row[0] if row and row[0] else None
 
+    def snapshot_decided(self, run_id: str) -> bool:
+        """Whether a snapshot decision was already recorded for this run — a row
+        exists even when its value is empty (= "no snapshot available; keep
+        current-read mode"). Lets a resume reuse the ORIGINAL decision instead of
+        re-capturing a new, inconsistent SCN on a later chunk."""
+        row = self._db.execute(
+            "SELECT 1 FROM watermarks WHERE run_id=? AND table_fqn='__run__' "
+            "AND kind='snapshot'", (run_id,)).fetchone()
+        return row is not None
+
     def add_table(self, run_id: str, table_fqn: str, target_table: str,
                   total_rows_est: int = 0) -> None:
         self._db.execute(

@@ -72,10 +72,15 @@ class ResumableLoader:
             # capture it on a fresh plan and REUSE it on resume, so completed and
             # pending chunks read the same point-in-time view of the source (Oracle
             # AS OF SCN). None => no snapshot available; quiesce the source.
-            snapshot = None if do_reset else man.get_snapshot(self.run_id)
-            if not snapshot:
+            # Capture the snapshot on a fresh plan or a not-yet-decided run; on a
+            # resume REUSE the recorded decision. A stored empty value means "no
+            # snapshot available — keep current-read mode" and must NOT silently
+            # re-capture a new (inconsistent) SCN on a later chunk.
+            if do_reset or not man.snapshot_decided(self.run_id):
                 snapshot = probe.capture_snapshot()
                 man.set_snapshot(self.run_id, snapshot)
+            else:
+                snapshot = man.get_snapshot(self.run_id)
             probe.use_snapshot(snapshot)
             for t in self.schema.tables:
                 self._table_by_fqn[t.fqn] = t
@@ -110,7 +115,7 @@ class ResumableLoader:
                   or getattr(s, "sid", None) or "")
         key = "|".join(str(x) for x in (
             getattr(s, "dialect", ""), s.host, s.port, src_db, s.schema or "", s.user,
-            getattr(t, "driver", ""), t.host, t.port, t.dbname,
+            getattr(t, "driver", ""), t.host, t.port, t.dbname, getattr(t, "user", ""),
             bool(o.preserve_case), int(self.parallelism),
         ))
         return hashlib.sha1(key.encode("utf-8")).hexdigest()
