@@ -3,7 +3,13 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.0] — 2026-06-26
+
+First stable release. The v1.0.0 primary target — fully migrate **Oracle →
+(PostgreSQL + HeliosDB-Nano)** — is validated end-to-end (schema, data,
+sequences, views, PK/FK/CHECK constraints, FK-indexes), including a
+million-row chunked/parallel load with crash-resume, and hardened through a
+three-round gpt-5.5 (xhigh) adversarial review (final verdict: safe to tag).
 
 ### Added
 - **Oracle procedural & advanced objects are now visible (v1.0.0 "Option A").**
@@ -23,6 +29,25 @@ All notable changes to Any2HeliosDB are documented here. This project adheres to
   materialized view, range-partitioned table) → PostgreSQL: data tier migrates
   (incl. the partitioned table as a flat table) with TEST_COUNT/TEST_DATA 4/4,
   while the six procedural/advanced objects are surfaced for review.
+
+### Fixed
+- **Pre-1.0 hardening from a multi-round adversarial review** (gpt-5.5, xhigh):
+  - Oracle chunked load + resume now read **one consistent snapshot** (`AS OF SCN`,
+    captured at plan time and reused across resume); falls back to a current read
+    (with a warning) if a table's DDL is newer than the snapshot.
+  - Oracle `[schema.]seq.NEXTVAL` column defaults translate to `nextval('seq')`
+    (preserve-case aware), so Oracle 12c+ sequence-default columns migrate to
+    PostgreSQL/Nano with a working auto-increment default.
+  - Oracle source identifiers (incl. chunk predicates) double an embedded `"`
+    (no invalid-SQL / injection on a legally quoted column name).
+  - A real Oracle `CHECK` ending in `IS NOT NULL` is preserved; only a
+    system-generated single-column NOT NULL check (confirmed via column-nullability
+    metadata) is skipped.
+  - `TEST_DATA` row checksums are length-framed (no delimiter-collision false
+    negative); native `load_range`/`upsert` are atomic (DELETE+INSERT in one
+    transaction); the resume manifest carries a config fingerprint (incl. target
+    user) so a reused run can't trust stale chunks; the COPY-file export codec
+    encodes `bytea` hex and fail-closes on an embedded NUL.
 
 ## [0.9.5] — 2026-06-26
 
