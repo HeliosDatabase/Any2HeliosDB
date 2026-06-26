@@ -17,7 +17,8 @@ psycopg driver stays the portable default across every edition.
 """
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Sequence, Tuple
+from contextlib import contextmanager
+from typing import Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from ..emit.oracle_ddl import oracle_ident
 from ..errors import TargetConnectionError
@@ -144,6 +145,34 @@ class NativeOracleDriver(TargetDriver):
     def rollback(self) -> None:
         self.conn.rollback()
 
+    @contextmanager
+    def _atomic(self) -> Iterator[None]:
+        """Run a DELETE+INSERT critical section as one all-or-nothing transaction.
+
+        connect() opens the connection with ``autocommit = True``, which makes a
+        bare DELETE commit the instant it executes. A DELETE-then-INSERT pair
+        (load_range / upsert) therefore loses data if the INSERT fails after the
+        DELETE has already auto-committed: the range is emptied but never
+        repopulated. Wrap the pair so autocommit is disabled for the duration,
+        the work is committed only once both statements succeed, and any failure
+        rolls the DELETE back. The connection's previous autocommit state is
+        always restored.
+        """
+        conn = self.conn
+        prev_autocommit = getattr(conn, "autocommit", True)
+        conn.autocommit = False
+        try:
+            yield
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 -- surface the original failure below
+                pass
+            raise
+        finally:
+            conn.autocommit = prev_autocommit
+
     # --- bulk load -------------------------------------------------------
     def copy_rows(
         self, target_table: str, columns: Sequence[str], rows: Iterable[Sequence[object]]
@@ -214,13 +243,16 @@ class NativeOracleDriver(TargetDriver):
         use_copy: bool = True,  # ignored: Oracle path always uses INSERT
     ) -> int:
         materialized = [tuple(r) for r in rows]
-        with self.conn.cursor() as cur:
-            cur.execute("DELETE FROM {}{}".format(
-                _oq(target_table), " WHERE {}".format(where) if where else ""))
-            if materialized:
-                self._bind_timestamps(cur, columns, materialized)
-                cur.executemany(self._insert_sql(target_table, columns), materialized)
-        self.conn.commit()
+        # DELETE + INSERT must be one atomic unit: under the connection's default
+        # autocommit the DELETE would commit immediately, so a failing INSERT
+        # would leave the range emptied (silent data loss). See _atomic().
+        with self._atomic():
+            with self.conn.cursor() as cur:
+                cur.execute("DELETE FROM {}{}".format(
+                    _oq(target_table), " WHERE {}".format(where) if where else ""))
+                if materialized:
+                    self._bind_timestamps(cur, columns, materialized)
+                    cur.executemany(self._insert_sql(target_table, columns), materialized)
         return len(materialized)
 
     # --- CDC apply (idempotent) -----------------------------------------
@@ -241,12 +273,14 @@ class NativeOracleDriver(TargetDriver):
             return 0
         where = " AND ".join("{} = :{}".format(oracle_ident(k), i + 1) for i, k in enumerate(key_cols))
         delete = "DELETE FROM {} WHERE {}".format(_oq(target_table), where)
-        with self.conn.cursor() as cur:
-            cur.executemany(delete, list(by_key.keys()))
-            values = list(by_key.values())
-            self._bind_timestamps(cur, columns, values)
-            cur.executemany(self._insert_sql(target_table, columns), values)
-        self.conn.commit()
+        # Atomic DELETE + INSERT for the same reason as load_range(): a failed
+        # re-insert after the per-key DELETE must not drop those rows.
+        with self._atomic():
+            with self.conn.cursor() as cur:
+                cur.executemany(delete, list(by_key.keys()))
+                values = list(by_key.values())
+                self._bind_timestamps(cur, columns, values)
+                cur.executemany(self._insert_sql(target_table, columns), values)
         return len(by_key)
 
     def delete_keys(

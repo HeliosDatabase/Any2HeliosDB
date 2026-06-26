@@ -70,6 +70,17 @@ class SourceAdapter(abc.ABC):
         range chunking — a single whole-table chunk); adapters override it."""
         return None
 
+    def capture_snapshot(self) -> Optional[str]:
+        """Capture a read-consistency token at plan time so a chunked + resumable
+        load reads ONE consistent view of the source. Default ``None`` (no
+        snapshot — quiesce the source); the Oracle adapter returns its SCN."""
+        return None
+
+    def use_snapshot(self, token: Optional[str]) -> None:
+        """Pin subsequent reads to *token* from :meth:`capture_snapshot`. No-op by
+        default; the Oracle adapter issues ``AS OF SCN`` reads."""
+        return None
+
     @abc.abstractmethod
     def stream_rows(
         self,

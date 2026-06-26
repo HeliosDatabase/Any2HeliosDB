@@ -11,6 +11,7 @@ overrides.
 from __future__ import annotations
 
 import math
+import re
 from typing import Iterator, List, Optional, Sequence, Tuple
 
 from ...constants import SourceDialect
@@ -61,8 +62,25 @@ def _reconstruct_source_type(
     return dt  # DATE, TIMESTAMP(6) [WITH TIME ZONE], CLOB, BLOB, etc. are self-describing
 
 
+def _oid(name: str) -> str:
+    """Quote one Oracle identifier, doubling any embedded double-quote.
+
+    A legally double-quoted Oracle name may contain a literal ``"`` (stored as
+    ``""``). Interpolating it raw would break or alter the SQL, so every
+    identifier that reaches a query string goes through here.
+    """
+    return '"{}"'.format(str(name).replace('"', '""'))
+
+
 def quote_oracle(owner: str, name: str) -> str:
-    return '"{}"."{}"'.format(owner, name)
+    return "{}.{}".format(_oid(owner), _oid(name))
+
+
+# A column's NOT NULL is implemented in Oracle as a system-generated CHECK with
+# the exact single-column form `"COL" IS NOT NULL`; that one is already modeled on
+# the column, so it's the ONLY check we drop. A real multi-term CHECK that merely
+# ends with IS NOT NULL (e.g. `email IS NULL OR phone IS NOT NULL`) is preserved.
+_GENERATED_NOTNULL = re.compile(r'^"?[A-Za-z0-9_$#]+"?\s+IS\s+NOT\s+NULL$', re.IGNORECASE)
 
 
 class OracleAdapter(SourceAdapter):
@@ -71,6 +89,7 @@ class OracleAdapter(SourceAdapter):
     def __init__(self, dsn: SourceDsn) -> None:
         super().__init__(dsn)
         self._conn = None  # type: ignore[assignment]
+        self._snapshot_scn: Optional[int] = None  # set via use_snapshot() for AS OF SCN reads
 
     def connect(self) -> None:
         import oracledb  # lazy
@@ -137,6 +156,29 @@ class OracleAdapter(SourceAdapter):
             except Exception:  # noqa: BLE001
                 continue
         return 0
+
+    # --- read-consistency snapshot (chunked load + resume) ---------------
+    def capture_snapshot(self) -> Optional[str]:
+        """Capture a read-consistency token (the current SCN) at plan time.
+
+        The loader persists it and feeds it to :meth:`use_snapshot`, so every
+        count / PK-bound / row read sees ONE consistent snapshot even though the
+        load is chunked and resumable — a source mutation mid-run can't leave a
+        completed chunk holding stale rows. Returns ``None`` if SCN is
+        unavailable (the caller should then quiesce the source)."""
+        scn = self.current_scn()
+        return str(scn) if scn else None
+
+    def use_snapshot(self, token: Optional[str]) -> None:
+        """Pin every subsequent read to the snapshot from :meth:`capture_snapshot`."""
+        try:
+            self._snapshot_scn = int(token) if token else None
+        except (TypeError, ValueError):
+            self._snapshot_scn = None
+
+    def _as_of(self) -> str:
+        """`AS OF SCN n` flashback clause for the pinned snapshot (or '')."""
+        return " AS OF SCN {}".format(self._snapshot_scn) if self._snapshot_scn else ""
 
     def list_schemas(self) -> List[str]:
         try:
@@ -373,13 +415,15 @@ class OracleAdapter(SourceAdapter):
     # --- extraction ------------------------------------------------------
     def exact_row_count(self, table: Table) -> int:
         owner = (table.schema or self.default_schema()).upper()
-        row = self._q1("SELECT COUNT(*) FROM {}".format(quote_oracle(owner, table.name)))
+        row = self._q1("SELECT COUNT(*) FROM {}{}".format(
+            quote_oracle(owner, table.name), self._as_of()))
         return int(row[0]) if row else 0
 
     def numeric_pk_bounds(self, table: Table, pk_col: str):  # type: ignore[no-untyped-def]
         owner = (table.schema or self.default_schema()).upper()
         row = self._q1(
-            'SELECT MIN("{c}"), MAX("{c}") FROM {t}'.format(c=pk_col, t=quote_oracle(owner, table.name))
+            "SELECT MIN({c}), MAX({c}) FROM {t}{a}".format(
+                c=_oid(pk_col), t=quote_oracle(owner, table.name), a=self._as_of())
         )
         if not row or row[0] is None:
             return None
@@ -401,8 +445,9 @@ class OracleAdapter(SourceAdapter):
         arraysize: int = 1000,
     ) -> Iterator[Tuple]:
         owner = (table.schema or self.default_schema()).upper()
-        col_list = ", ".join('"{}"'.format(c) for c in columns)
-        sql = "SELECT {} FROM {}".format(col_list, quote_oracle(owner, table.name))
+        col_list = ", ".join(_oid(c) for c in columns)
+        sql = "SELECT {} FROM {}{}".format(
+            col_list, quote_oracle(owner, table.name), self._as_of())
         if where:
             sql += " WHERE {}".format(where)
         cur = self.conn.cursor()

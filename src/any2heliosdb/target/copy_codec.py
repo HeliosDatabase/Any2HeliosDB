@@ -62,7 +62,22 @@ def unescape_copy_text(s: str) -> str:
 def encode_field(value: Optional[object], null_string: str = DEFAULT_NULL) -> str:
     if value is None:
         return null_string
-    return escape_copy_text(value if isinstance(value, str) else str(value))
+    # bytes/bytearray/memoryview -> PostgreSQL bytea hex literal. The on-wire
+    # value is ``\xDEADBEEF``; in COPY TEXT a literal backslash is doubled, so
+    # the field token is ``\\xDEADBEEF``. (repr() would corrupt BLOB/RAW data.)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "\\\\x" + bytes(value).hex()
+    if isinstance(value, str):
+        # PostgreSQL text cannot store an embedded NUL. Fail closed rather than
+        # silently truncating/corrupting the value at load time.
+        if "\x00" in value:
+            raise ValueError(
+                "COPY text field contains an embedded NUL (\\x00) at byte "
+                f"offset {value.index(chr(0))}, which PostgreSQL text cannot "
+                "store; clean the source value before exporting."
+            )
+        return escape_copy_text(value)
+    return escape_copy_text(str(value))
 
 
 def encode_row(

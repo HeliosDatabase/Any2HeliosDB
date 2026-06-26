@@ -104,6 +104,30 @@ class Manifest:
         )
         self._db.commit()
 
+    def get_run(self, run_id: str):  # type: ignore[no-untyped-def]
+        """``(config_hash, source_fingerprint)`` for a prior run, else ``(None, None)``.
+
+        Lets the loader detect config/source drift before trusting LOADED chunks
+        from a reused run id (resume), and reset rather than silently mix plans."""
+        row = self._db.execute(
+            "SELECT config_hash, source_fingerprint FROM runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
+    def set_snapshot(self, run_id: str, token: Optional[str]) -> None:
+        """Persist the source read-consistency token (e.g. Oracle SCN) for a run so
+        a resume reads the SAME snapshot the original plan captured."""
+        self._db.execute(
+            "INSERT OR REPLACE INTO watermarks (run_id, table_fqn, kind, value, captured_at) "
+            "VALUES (?, '__run__', 'snapshot', ?, '')", (run_id, token or ""))
+        self._db.commit()
+
+    def get_snapshot(self, run_id: str) -> Optional[str]:
+        row = self._db.execute(
+            "SELECT value FROM watermarks WHERE run_id=? AND table_fqn='__run__' "
+            "AND kind='snapshot'", (run_id,)).fetchone()
+        return row[0] if row and row[0] else None
+
     def add_table(self, run_id: str, table_fqn: str, target_table: str,
                   total_rows_est: int = 0) -> None:
         self._db.execute(

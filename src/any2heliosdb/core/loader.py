@@ -59,9 +59,24 @@ class ResumableLoader:
         probe.connect()
         man = Manifest(self.manifest_path)
         try:
-            man.start_run(self.run_id)
-            if self.fresh:
+            cfg_hash = self._config_hash()
+            prior_hash, _ = man.get_run(self.run_id)
+            # Drift guard: a reused run_id whose plan-affecting config changed must
+            # not trust prior LOADED chunks (their predicates/bounds are stale), so
+            # reset rather than silently mix two plans.
+            do_reset = self.fresh or bool(prior_hash and prior_hash != cfg_hash)
+            man.start_run(self.run_id, config_hash=cfg_hash)
+            if do_reset:
                 man.reset_run(self.run_id)
+            # ONE read-consistency snapshot for the whole (possibly resumed) load:
+            # capture it on a fresh plan and REUSE it on resume, so completed and
+            # pending chunks read the same point-in-time view of the source (Oracle
+            # AS OF SCN). None => no snapshot available; quiesce the source.
+            snapshot = None if do_reset else man.get_snapshot(self.run_id)
+            if not snapshot:
+                snapshot = probe.capture_snapshot()
+                man.set_snapshot(self.run_id, snapshot)
+            probe.use_snapshot(snapshot)
             for t in self.schema.tables:
                 self._table_by_fqn[t.fqn] = t
                 # Record a source row estimate so the live monitor can show
@@ -83,6 +98,22 @@ class ResumableLoader:
         finally:
             man.close()
             probe.close()
+
+    def _config_hash(self) -> str:
+        """Stable hash of the plan-affecting config (source/target identity +
+        schema + parallelism + preserve_case; passwords excluded). Drives the
+        drift guard in plan() so a reused run_id can't trust stale LOADED chunks
+        after the config that produced them changed."""
+        import hashlib
+        s, t, o = self.cfg.source, self.cfg.target, self.cfg.options
+        src_db = (getattr(s, "database", None) or getattr(s, "service_name", None)
+                  or getattr(s, "sid", None) or "")
+        key = "|".join(str(x) for x in (
+            getattr(s, "dialect", ""), s.host, s.port, src_db, s.schema or "", s.user,
+            getattr(t, "driver", ""), t.host, t.port, t.dbname,
+            bool(o.preserve_case), int(self.parallelism),
+        ))
+        return hashlib.sha1(key.encode("utf-8")).hexdigest()
 
     # --- execution -------------------------------------------------------
     def run(self) -> LoadStats:
@@ -149,6 +180,10 @@ class ResumableLoader:
         man = Manifest(self.manifest_path)
         try:
             src.connect()
+            # Read this chunk at the run's pinned snapshot (Oracle AS OF SCN), so
+            # a row updated/deleted on the source after an earlier chunk committed
+            # can't make this chunk inconsistent with the rest of the load.
+            src.use_snapshot(man.get_snapshot(self.run_id))
             tgt.connect()
             man.set_chunk_state(self.run_id, table_fqn, chunk.chunk_id, M.IN_PROGRESS, bump_attempt=True)
             tname = table.target_name(self.preserve_case)

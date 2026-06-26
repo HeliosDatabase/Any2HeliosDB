@@ -120,14 +120,22 @@ def _render(v: object) -> str:
 
 
 def row_checksum(values: Iterable[object]) -> str:
-    """SHA256 hex digest of a row's values (order-sensitive, NULL-aware)."""
+    """SHA256 hex digest of a row's values (order-sensitive, NULL-aware).
+
+    Each field is **length-framed**: we feed the field's UTF-8 byte length (as a
+    fixed-width decimal prefix terminated by ``_FIELD_SEP``) followed by its bytes.
+    A bare delimiter join is ambiguous — a rendered value containing the delimiter
+    could shift a field boundary, so two different rows could collide (e.g.
+    ``("a", "b\\x01c")`` and ``("a\\x01b", "c")`` join to the same byte stream).
+    Framing by length makes the boundaries unambiguous, so distinct rows can never
+    hash identically while equal rows still match (both sides run this same code)."""
     h = hashlib.sha256()
-    first = True
     for v in values:
-        if not first:
-            h.update(_FIELD_SEP.encode("utf-8"))
-        first = False
-        h.update(_render(v).encode("utf-8"))
+        b = _render(v).encode("utf-8")
+        # length prefix (decimal) + separator + payload => self-delimiting frame
+        h.update(str(len(b)).encode("ascii"))
+        h.update(_FIELD_SEP.encode("utf-8"))
+        h.update(b)
     return h.hexdigest()
 
 
