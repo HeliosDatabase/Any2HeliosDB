@@ -18,6 +18,8 @@ from any2heliosdb.sources.oracle.adapter import (
     ("emp_seq.nextval", "nextval('emp_seq')"),
     ("HR.EMP_SEQ.NEXTVAL", "nextval('emp_seq')"),
     ('"HR"."EMP_SEQ".NEXTVAL', "nextval('emp_seq')"),
+    ('"HR"."EMP_SEQ"."NEXTVAL"', "nextval('emp_seq')"),   # Oracle's stored form
+    ('"EMP_SEQ"."NEXTVAL"', "nextval('emp_seq')"),
     ("EMP_SEQ . NEXTVAL", "nextval('emp_seq')"),
 ])
 def test_translate_oracle_nextval_default(default, expected):

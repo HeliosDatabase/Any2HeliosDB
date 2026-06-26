@@ -271,8 +271,10 @@ class OracleAdapter(SourceAdapter):
             "WHERE owner=:o AND table_name=:t AND constraint_type='C'", o=owner, t=name,
         ):
             text = (cond or "").strip()
-            # Skip the system-generated NOT NULL checks; those are modeled on the column.
-            if not text or text.upper().endswith("IS NOT NULL"):
+            # Skip ONLY a system-generated single-column NOT NULL check (already
+            # modeled on the column); a real multi-term CHECK that merely ends with
+            # IS NOT NULL (e.g. `email IS NULL OR phone IS NOT NULL`) is preserved.
+            if not text or _GENERATED_NOTNULL.match(text):
                 continue
             constraints.append(Constraint(
                 constraint_type=ConstraintKind.CHECK, name=cname, expression=text,
