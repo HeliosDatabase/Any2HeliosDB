@@ -62,8 +62,12 @@ def render_create_table(
 # Oracle sequence default: `[schema.]seq.NEXTVAL` (optionally quoted). The captured
 # group is the sequence identifier immediately before .NEXTVAL (schema prefix and
 # quotes dropped).
+# Oracle stores a sequence default fully-quoted, e.g. `"HR"."EMP_SEQ"."NEXTVAL"`
+# (NEXTVAL itself quoted), and may or may not include the schema. Allow any number
+# of leading `[schema.]` parts, capture the sequence identifier, and accept NEXTVAL
+# quoted or bare.
 _ORA_NEXTVAL = re.compile(
-    r'^(?:"?[A-Za-z0-9_$#]+"?\s*\.\s*)?"?([A-Za-z0-9_$#]+)"?\s*\.\s*NEXTVAL\s*$',
+    r'^(?:"?[A-Za-z0-9_$#]+"?\s*\.\s*)*"?([A-Za-z0-9_$#]+)"?\s*\.\s*"?NEXTVAL"?\s*$',
     re.IGNORECASE)
 
 
