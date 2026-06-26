@@ -21,10 +21,17 @@ from ...core.catalog_model import (
     ForeignKey,
     Index,
     IndexColumn,
+    Partition,
+    PartitionInfo,
+    PartitionType,
     PrimaryKey,
+    Routine,
+    RoutineKind,
     Schema,
     Sequence as SequenceObj,
     Table,
+    TableOptions,
+    Trigger,
     View,
 )
 from ...errors import IntrospectionError, SourceConnectionError
@@ -142,15 +149,28 @@ class OracleAdapter(SourceAdapter):
     # --- introspection ---------------------------------------------------
     def introspect_schema(self, schema: Optional[str] = None) -> Schema:
         owner = (schema or self.default_schema()).upper()
+        # A materialized view's container relation is listed in all_tables under
+        # the mview name; exclude it so it isn't migrated as a plain table AND
+        # surfaced as an mview (it's handled as an mview — review-only).
+        mviews = self._materialized_views(owner)
+        mview_names = {m.name for m in mviews}
         try:
             tables = [self._table(owner, name) for (name,) in self._qall(
                 "SELECT table_name FROM all_tables WHERE owner=:o ORDER BY table_name", o=owner
-            )]
+            ) if name not in mview_names]
             sequences = self._sequences(owner)
             views = self._views(owner)
         except Exception as e:  # noqa: BLE001
             raise IntrospectionError("Oracle introspection failed for {}: {}".format(owner, e)) from e
-        return Schema(name=owner, tables=tables, sequences=sequences, views=views)
+        # Procedural / advanced objects are surfaced for assessment + review only —
+        # v1.0.0 does NOT auto-translate them (PL/SQL -> PL/pgSQL is the v2.0.0
+        # roadmap). Each probe is best-effort (see _try_qall): a missing privilege
+        # on a dictionary view must never fail an otherwise-valid table/data migration.
+        return Schema(
+            name=owner, tables=tables, sequences=sequences, views=views,
+            mviews=self._materialized_views(owner),
+            routines=self._routines(owner), triggers=self._triggers(owner),
+        )
 
     def _table(self, owner: str, name: str) -> Table:
         cols: List[Column] = []
@@ -231,6 +251,7 @@ class OracleAdapter(SourceAdapter):
         return Table(
             name=name, schema=owner, columns=cols, primary_key=primary_key,
             foreign_keys=fks, indexes=indexes, constraints=constraints,
+            options=TableOptions(partition=self._partition_info(owner, name)),
         )
 
     def _sequences(self, owner: str) -> List[SequenceObj]:
@@ -257,6 +278,96 @@ class OracleAdapter(SourceAdapter):
             "SELECT view_name, text FROM all_views WHERE owner=:o", o=owner,
         ):
             out.append(View(name=vname, schema=owner, definition=str(text or "").strip()))
+        return out
+
+    # --- procedural / advanced objects (assess + review only; never auto-applied) ---
+    def _try_qall(self, sql: str, **binds: object) -> List[Tuple]:
+        """Like :meth:`_qall` but swallows errors (returns ``[]``).
+
+        Procedural-object probes must be best-effort: a role without privileges on
+        ``all_source`` / ``all_triggers`` / ``all_mviews`` / ``all_part_tables``
+        (or a LONG-column quirk) degrades to "nothing found", never failing the
+        table + data migration, which is the part that must always succeed.
+        """
+        try:
+            return self._qall(sql, **binds)
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _partition_info(self, owner: str, name: str) -> Optional[PartitionInfo]:
+        """Detect Oracle partitioning so ``assess`` can flag it.
+
+        v1.0.0 migrates a partitioned table's DATA into a single target table (the
+        parent SELECT returns every partition's rows); the partitioning SCHEME is
+        not recreated. Capturing the type/key/partition-names lets the assessment
+        emit a gap so the partitioning can be recreated on the target if wanted.
+        """
+        rows = self._try_qall(
+            "SELECT partitioning_type FROM all_part_tables WHERE owner=:o AND table_name=:t",
+            o=owner, t=name)
+        if not rows:
+            return None
+        ptype = {"RANGE": PartitionType.RANGE, "LIST": PartitionType.LIST,
+                 "HASH": PartitionType.HASH}.get(
+                     str(rows[0][0] or "").upper().split("-")[0].strip(), PartitionType.RANGE)
+        cols = [r[0] for r in self._try_qall(
+            "SELECT column_name FROM all_part_key_columns "
+            "WHERE owner=:o AND name=:t ORDER BY column_position", o=owner, t=name)]
+        parts = [Partition(name=str(r[0]), value="") for r in self._try_qall(
+            "SELECT partition_name FROM all_tab_partitions "
+            "WHERE table_owner=:o AND table_name=:t ORDER BY partition_position",
+            o=owner, t=name)]
+        return PartitionInfo(partition_type=ptype, columns=cols, partitions=parts)
+
+    def _routines(self, owner: str) -> List[Routine]:
+        """Capture PROCEDURE/FUNCTION/PACKAGE source verbatim, for review.
+
+        Bodies are NOT translated (that is the v2.0.0 roadmap) — they are counted
+        by ``assess``, flagged as gaps, and written to a ``.review.sql`` companion
+        by ``export`` for manual PL/pgSQL porting. A FUNCTION maps to
+        ``RoutineKind.FUNCTION`` and everything else (procedure / package spec /
+        package body) to PROCEDURE; the verbatim source (its first line names the
+        real object type) is the precise artifact.
+        """
+        by_obj: dict = {}
+        order: list = []
+        for (oname, otype, text) in self._try_qall(
+            "SELECT name, type, text FROM all_source "
+            "WHERE owner=:o AND type IN ('PROCEDURE','FUNCTION','PACKAGE','PACKAGE BODY') "
+            "ORDER BY name, type, line", o=owner):
+            key = (str(oname), str(otype))
+            if key not in by_obj:
+                by_obj[key] = []
+                order.append(key)
+            by_obj[key].append(str(text or ""))
+        out: List[Routine] = []
+        for (oname, otype) in order:
+            kind = RoutineKind.FUNCTION if otype == "FUNCTION" else RoutineKind.PROCEDURE
+            body = "".join(by_obj[(oname, otype)]).strip()
+            out.append(Routine(name=oname, kind=kind, body=body, language="plsql", schema=owner))
+        return out
+
+    def _triggers(self, owner: str) -> List[Trigger]:
+        """Capture trigger metadata + body verbatim, for review (not translated)."""
+        out: List[Trigger] = []
+        for (tname, table, ttype, tevent, tbody) in self._try_qall(
+            "SELECT trigger_name, table_name, trigger_type, triggering_event, trigger_body "
+            "FROM all_triggers WHERE owner=:o", o=owner):
+            tt = str(ttype or "").upper()
+            timing = "INSTEAD OF" if "INSTEAD OF" in tt else ("AFTER" if tt.startswith("AFTER") else "BEFORE")
+            events = [e.strip().upper() for e in
+                      str(tevent or "").replace(" OR ", ",").split(",") if e.strip()]
+            out.append(Trigger(name=str(tname), table=str(table or ""), timing=timing,
+                               events=events, body=str(tbody or "").strip(), schema=owner))
+        return out
+
+    def _materialized_views(self, owner: str) -> List[View]:
+        """Capture materialized-view names + defining queries, for review."""
+        out: List[View] = []
+        for (mname, query) in self._try_qall(
+            "SELECT mview_name, query FROM all_mviews WHERE owner=:o", o=owner):
+            out.append(View(name=str(mname), definition=str(query or "").strip(),
+                            materialized=True, schema=owner))
         return out
 
     # --- extraction ------------------------------------------------------
