@@ -30,6 +30,7 @@ from ...core.catalog_model import (
     IndexColumn,
     PrimaryKey,
     Schema,
+    Sequence,
     Table,
     View,
 )
@@ -282,7 +283,7 @@ class PostgresAdapter(SourceAdapter):
         except Exception as e:  # noqa: BLE001
             raise IntrospectionError(
                 "PostgreSQL introspection failed for {}: {}".format(ns, e)) from e
-        return Schema(name=ns, tables=tables, sequences=[], views=views)
+        return Schema(name=ns, tables=tables, sequences=self._sequences(ns), views=views)
 
     # --- introspection via information_schema (PostgreSQL / HeliosDB-Full) ---
     def _table(self, ns: str, name: str) -> Table:
@@ -483,6 +484,44 @@ class PostgresAdapter(SourceAdapter):
                 out.append(View(name=vname, schema=ns, definition=body))
         return out
 
+    def _sequences(self, ns: str) -> List[Sequence]:
+        """Introspect sequences (incl. SERIAL/IDENTITY-owned) so the target can
+        recreate them with the correct resume point.
+
+        Prefers ``pg_sequences`` (PG 10+ / HeliosDB-Nano >= 3.60: carries
+        increment/min/max/cycle/cache), then reads each sequence's live
+        ``last_value``/``is_called`` so the target START is the *next* value the
+        source would hand out — post-migration inserts then can't collide with
+        the rows just loaded. Falls back to ``information_schema.sequences``.
+        Enumerates by name (never count(*): catalog-view count(*) reads 0 on
+        HeliosDB). A server that lists no sequences -> empty list (unchanged).
+        """
+        rows = self._try_qall(
+            "SELECT sequencename, increment_by, min_value, max_value, cycle, "
+            "cache_size, start_value FROM pg_sequences WHERE schemaname=%s "
+            "ORDER BY sequencename", ns)
+        if not rows:
+            rows = [(r[0], r[1], r[2], r[3], (str(r[4]).upper() == "YES"), 1, r[5])
+                    for r in self._try_qall(
+                        "SELECT sequence_name, increment, minimum_value, maximum_value, "
+                        "cycle_option, start_value FROM information_schema.sequences "
+                        "WHERE sequence_schema=%s ORDER BY sequence_name", ns)]
+        out: List[Sequence] = []
+        for (name, inc, minv, maxv, cycle, cache, start_value) in rows:
+            inc_i = _as_int(inc) or 1
+            start = _as_int(start_value) or 1
+            # Resume at the next value the source would produce.
+            cur = self._q1("SELECT last_value, is_called FROM {}".format(quote_ident(name)))
+            if cur and cur[0] is not None:
+                last = _as_int(cur[0])
+                if last is not None:
+                    start = (last + inc_i) if bool(cur[1]) else last
+            out.append(Sequence(
+                name=name, start=start, increment=inc_i,
+                min_value=_as_int(minv), max_value=_as_int(maxv),
+                cache=(_as_int(cache) or 1), cycle=bool(cycle), schema=ns))
+        return out
+
     # --- extraction ------------------------------------------------------
     def exact_row_count(self, table: Table) -> int:
         ns = table.schema or self.default_schema()
@@ -540,12 +579,14 @@ def _clean_default(raw: object) -> Optional[str]:
     if not s or s.upper() == "NULL":
         return None
     up = s.upper()
-    # nextval(...) sequence defaults and other expression defaults are not
-    # replayed: the data already carries the values, and a verbatim expression
-    # risks cross-dialect breakage. Keep only simple numeric literals and the
-    # universally-safe CURRENT_TIMESTAMP.
+    # nextval(...) sequence defaults ARE replayed (normalized to a bare,
+    # schema-unqualified nextval('seq')) so a SERIAL/IDENTITY column keeps its
+    # auto-increment default on a PG-family target. The companion sequence is
+    # introspected by _sequences() and created first by the orchestrator. The
+    # Oracle/MySQL emitters skip a nextval default (their dialects spell
+    # auto-increment differently), so migrate-back is unaffected.
     if up.startswith("NEXTVAL("):
-        return None
+        return _normalize_nextval(s)
     if up in ("CURRENT_TIMESTAMP", "NOW()"):
         return "CURRENT_TIMESTAMP"
     # Strip a type cast suffix Postgres adds to literals (e.g. 'x'::text, 1::integer).
@@ -556,6 +597,24 @@ def _clean_default(raw: object) -> Optional[str]:
         return s
     except ValueError:
         return None
+
+
+def _normalize_nextval(default: str) -> Optional[str]:
+    """Reduce a PostgreSQL ``nextval`` default to a portable ``nextval('seq')``.
+
+    Input is e.g. ``nextval('public.actor_actor_id_seq'::regclass)``; strip the
+    ``::regclass`` cast and any schema qualifier (the migration targets one
+    schema and the sequence is created unqualified) so the column default matches
+    the ``CREATE SEQUENCE`` name the emitter produces. Returns None if the
+    sequence name can't be parsed (caller then drops the default).
+    """
+    m = re.search(r"nextval\(\s*'([^']+)'", default, re.IGNORECASE)
+    if not m:
+        return None
+    seqname = m.group(1)
+    if "." in seqname:
+        seqname = seqname.rsplit(".", 1)[-1]
+    return "nextval('{}')".format(seqname)
 
 
 def _normalize_format_type(fmt: str) -> str:

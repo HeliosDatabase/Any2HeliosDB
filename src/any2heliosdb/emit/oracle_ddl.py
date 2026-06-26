@@ -32,7 +32,9 @@ def render_create_table_oracle(table: Table) -> str:
         piece = "  {} {}".format(oracle_ident(col.name), _col_type(col))
         if not col.nullable:
             piece += " NOT NULL"
-        if col.default is not None:
+        # Skip a PG nextval() default: Oracle spells auto-increment differently
+        # (sequence + trigger / IDENTITY), so a verbatim nextval would be invalid.
+        if col.default is not None and not col.default.strip().upper().startswith("NEXTVAL("):
             piece += " DEFAULT {}".format(col.default)
         lines.append(piece)
     if table.primary_key and table.primary_key.columns:

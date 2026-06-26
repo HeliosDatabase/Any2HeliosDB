@@ -3,6 +3,32 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **PostgreSQL-source sequence migration.** The PG source adapter now
+  introspects sequences (`pg_sequences`, falling back to
+  `information_schema.sequences`) and preserves each SERIAL/IDENTITY column's
+  `DEFAULT nextval('seq')` (normalized to a bare, schema-unqualified reference).
+  Each target sequence's `START` is set to the *next* value the source would
+  produce (read from live `last_value`/`is_called`) so post-migration inserts
+  resume past the loaded rows instead of colliding. Sequences are now created
+  **before** tables so a `DEFAULT nextval` resolves at `CREATE TABLE` time, and
+  the emitter carries the source `CACHE` size. The Oracle/MySQL emitters skip a
+  PG `nextval()` default (those dialects spell auto-increment differently), so
+  migrate-back is unaffected. Validated Pagila → HeliosDB-Nano 3.60.0: all 13
+  sequences created with correct resume points and a working `DEFAULT nextval`
+  (insert without the PK auto-increments), TEST_COUNT/TEST_DATA/TEST_INDEX 15/15.
+
+### Fixed
+- **Native (Oracle-wire) TIMESTAMP fractional seconds dropped.**
+  python-oracledb defaults a `datetime` bind to `DB_TYPE_DATE` (7-byte, no
+  fractional seconds), truncating sub-second precision client-side before it
+  reaches HeliosDB. The native driver now binds datetime positions as
+  `DB_TYPE_TIMESTAMP` (`setinputsizes`), so `TIMESTAMP(6)` values round-trip
+  exactly. Completes the native Oracle → HeliosDB-Full path (TEST_DATA 0
+  mismatches incl. BLOB/RAW/fractional-TIMESTAMP).
+
 ## [0.9.4] — 2026-06-25
 
 ### Fixed
