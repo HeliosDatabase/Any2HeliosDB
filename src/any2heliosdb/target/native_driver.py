@@ -167,22 +167,28 @@ class NativeOracleDriver(TargetDriver):
         keep oracledb's own inference (``None``).
         """
         import datetime as _dt
-        import oracledb
 
-        sizes: list = []
-        any_ts = False
+        # Find datetime positions first (pure Python): a rowset with no datetime
+        # never imports oracledb, which keeps the hermetic mock tests (and any
+        # oracledb-free environment) working. oracledb is always present on the
+        # real connect() path, so the guarded import below only no-ops in tests.
+        ts_cols = []
         for i in range(len(columns)):
-            kind = None
             for r in rows:
                 v = r[i]
                 if v is not None:
                     if isinstance(v, _dt.datetime):
-                        kind = oracledb.DB_TYPE_TIMESTAMP
-                        any_ts = True
+                        ts_cols.append(i)
                     break
-            sizes.append(kind)
-        if any_ts:
-            cur.setinputsizes(*sizes)
+        if not ts_cols:
+            return
+        try:
+            import oracledb
+        except ImportError:  # pragma: no cover - the native path always has oracledb
+            return
+        sizes = [oracledb.DB_TYPE_TIMESTAMP if i in ts_cols else None
+                 for i in range(len(columns))]
+        cur.setinputsizes(*sizes)
 
     def insert_rows(
         self,
