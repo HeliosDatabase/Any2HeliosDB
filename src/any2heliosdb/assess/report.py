@@ -26,6 +26,8 @@ from .inventory import schema_inventory
 # the plsql module's gap report is wired in.
 _COST_PER_ROUTINE = 0.25
 _COST_PER_TRIGGER = 0.1
+_COST_PER_MVIEW = 0.1
+_COST_PER_PARTITIONED = 0.1
 
 
 @dataclass
@@ -109,9 +111,13 @@ def build_report(
                 }
             )
 
+    partitioned = sum(
+        1 for t in schema.tables if getattr(t.options, "partition", None) is not None)
     cost_person_days = round(
         _COST_PER_ROUTINE * len(schema.routines)
-        + _COST_PER_TRIGGER * len(schema.triggers),
+        + _COST_PER_TRIGGER * len(schema.triggers)
+        + _COST_PER_MVIEW * len(schema.mviews)
+        + _COST_PER_PARTITIONED * partitioned,
         2,
     )
 

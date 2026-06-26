@@ -44,12 +44,15 @@ def schema_inventory(schema: Schema) -> Dict[str, object]:
     total_columns = 0
     total_indexes = 0
     total_foreign_keys = 0
+    total_partitioned = 0
 
     for table in schema.tables:
         cols = [_column_entry(c) for c in table.columns]
         total_columns += len(cols)
         total_indexes += len(table.indexes)
         total_foreign_keys += len(table.foreign_keys)
+        if getattr(table.options, "partition", None) is not None:
+            total_partitioned += 1
         tables.append(
             {
                 "name": table.name,
@@ -66,6 +69,8 @@ def schema_inventory(schema: Schema) -> Dict[str, object]:
         "sequences": len(schema.sequences),
         "routines": len(schema.routines),
         "triggers": len(schema.triggers),
+        "materialized_views": len(schema.mviews),
+        "partitioned_tables": total_partitioned,
         "indexes": total_indexes,
         "foreign_keys": total_foreign_keys,
         "types": len(schema.types),

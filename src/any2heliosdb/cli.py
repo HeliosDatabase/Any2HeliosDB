@@ -115,13 +115,18 @@ def assess(
     from .config.store import build_source_adapter, build_type_registry, load_config
     from .assess import render
     from .assess.report import build_report
+    from .plsql.procedural import build_procedural_gaps
 
     cfg = load_config(config)
     src = build_source_adapter(cfg)
     src.connect()
     try:
         schema = src.introspect_schema(cfg.source.schema)
-        report = build_report(schema, build_type_registry(cfg))
+        # Procedural/advanced objects (routines, triggers, mviews, partitions) are
+        # surfaced as gaps so the report counts + recommends them (v1.0.0 does not
+        # auto-translate them; `export` writes their source to a .review.sql).
+        report = build_report(
+            schema, build_type_registry(cfg), gap_report=build_procedural_gaps(schema))
         renderer = {"text": render.render_text, "json": render.render_json,
                     "html": render.render_html}.get(fmt)
         if renderer is None:
@@ -189,6 +194,18 @@ def export(
             f.write("\n\n".join(parts) + "\n")
         console.print("wrote {} ({} tables, {} sequences, {} views)".format(
             output, len(schema.tables), len(schema.sequences), len(schema.views)))
+        # Procedural/advanced objects are NOT auto-translated (v1.0.0); emit their
+        # verbatim source to a .review.sql companion for manual porting.
+        from .plsql.procedural import render_review
+        review = render_review(schema)
+        if review:
+            base = output[:-4] if output.endswith(".sql") else output
+            review_path = base + ".review.sql"
+            with open(review_path, "w") as rf:
+                rf.write(review)
+            console.print(
+                "wrote {} ({} routines, {} triggers, {} materialized views — manual review)".format(
+                    review_path, len(schema.routines), len(schema.triggers), len(schema.mviews)))
     finally:
         src.close()
 

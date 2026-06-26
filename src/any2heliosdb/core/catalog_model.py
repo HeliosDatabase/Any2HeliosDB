@@ -359,6 +359,7 @@ class Schema:
     name: str
     tables: List[Table] = field(default_factory=list)
     views: List[View] = field(default_factory=list)
+    mviews: List[View] = field(default_factory=list)  # materialized views (review-only)
     sequences: List[Sequence] = field(default_factory=list)
     routines: List[Routine] = field(default_factory=list)
     triggers: List[Trigger] = field(default_factory=list)

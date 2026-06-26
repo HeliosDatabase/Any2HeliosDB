@@ -3,6 +3,27 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Oracle procedural & advanced objects are now visible (v1.0.0 "Option A").**
+  The Oracle source adapter introspects stored **routines** (PROCEDURE / FUNCTION
+  / PACKAGE), **triggers**, **materialized views**, and detects **partitioned
+  tables** — previously none of these were seen, so `a2h assess` under-reported a
+  schema (e.g. "0 routines" for a package-heavy DB). They are now:
+  - **counted** in `a2h assess` / SHOW_REPORT and folded into the person-day cost,
+  - **gap-reported** (one `DEGRADED` gap each — the data migration still succeeds),
+  - written verbatim to a **`<schema>.review.sql`** companion by `a2h export` for
+    manual porting.
+  These objects are **not auto-translated** (the thin-tool bar); PL/SQL →
+  PL/pgSQL auto-translation is the **v2.0.0** roadmap (see
+  `docs/reference/oracle-object-support.md`). A materialized view's container
+  table is excluded from the migrated table set (it's handled as an mview).
+  Validated on a rich Oracle HR schema (procedure, function, package, trigger,
+  materialized view, range-partitioned table) → PostgreSQL: data tier migrates
+  (incl. the partitioned table as a flat table) with TEST_COUNT/TEST_DATA 4/4,
+  while the six procedural/advanced objects are surfaced for review.
+
 ## [0.9.5] — 2026-06-26
 
 ### Added
