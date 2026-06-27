@@ -10,7 +10,10 @@ resume.
 
 ## Prerequisites
 
-- **HeliosDB-Nano 3.58.5 or newer.** See
+- **HeliosDB-Nano 3.58.5 or newer** — and **≥ 3.60.4 if the schema has
+  sequences** (CREATE SEQUENCE / `DEFAULT nextval` is a Nano 3.60.0 feature; 3.60.4
+  is the recommended floor as it folds the ROLLBACK-TO-SAVEPOINT and
+  `column_default` catalog fixes). See
   [HeliosDB compatibility](../heliosdb-compatibility.md) for the capability probe
   and minimum builds. Keep Nano current — older builds may have target-side gaps
   that current releases have closed.
