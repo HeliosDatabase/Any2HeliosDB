@@ -9,10 +9,10 @@ adapts to whatever the target actually supports.
 
 | Target | Minimum version | Bulk load | Notes |
 |---|---|---|---|
-| **HeliosDB-Nano** | 3.58.5 | INSERT (no COPY) | The Apache edition; PG-wire. CDC apply is gated to **Nano ≥ 3.58.5**. |
+| **HeliosDB-Nano** | 3.58.5 (**≥ 3.60.4 for sequences**) | INSERT (no COPY) | The Apache edition; PG-wire. CDC apply is gated to **Nano ≥ 3.58.5**. **Sequence migration** (`CREATE SEQUENCE` / `DEFAULT nextval`) requires **Nano ≥ 3.60.4** (recommended floor — folds the ROLLBACK-TO-SAVEPOINT + `column_default` catalog fixes). Validated end-to-end Oracle→Nano and PostgreSQL→Nano. |
 | **HeliosDB-Lite** | 2.0 | COPY | PG-wire. Concurrent transactions are not yet supported, so the loader uses a serial-retry mop-up pass (the load still converges with no duplicates). |
 | **HeliosDB-Full** | current `main` build | COPY | PG-wire. The most complete edition: migrate, validate, and CDC. |
-| **Stock PostgreSQL** | 14+ | COPY | The reference PG-wire target; creates sequences natively and runs full PL/pgSQL. |
+| **Stock PostgreSQL** | 14+ | COPY | The reference PG-wire target; creates sequences natively and runs full PL/pgSQL. Validated on PostgreSQL **16.13 and 17.10**. |
 
 All four are reached with **`pip install any2heliosdb`** and the default
 `psycopg` driver — no edition flag. The capability probe (below) classifies the
