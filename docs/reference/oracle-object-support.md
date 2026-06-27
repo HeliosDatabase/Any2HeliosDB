@@ -30,8 +30,12 @@ writes the target DDL to `schema.sql` **and** the procedural source verbatim to
 
 ## Roadmap
 
-Procedural-object **auto-translation** (PL/SQL → PL/pgSQL) and **AI-assisted
-live-rewrite** of objects that can't be translated mechanically are the v2.0.0
-goals — see **[docs/roadmap/v2.0.0.md](../roadmap/v2.0.0.md)**. v1.0.0's
+**AI-native procedural migration** is the v2.0.0 goal — an LLM (**Ollama** or a
+**RESTful / OpenAI-compatible** endpoint) analyzes each object + its dependencies,
+adapts it to the target dialect, and tests it in an **ephemeral metadata-only
+sandbox** before migrating working code; objects it can't get working fall back to
+a pinpointed refactoring-effort estimate. See
+**[docs/roadmap/v2.0.0.md](../roadmap/v2.0.0.md)**. (A hand-written deterministic
+PL/SQL → PL/pgSQL transpiler is treated as **obsolete in the AI era**.) v1.0.0's
 introspection already captures every procedural object's verbatim source, so
-v2.0.0 builds on that foundation rather than re-reading it.
+v2.0.0 builds on that foundation.

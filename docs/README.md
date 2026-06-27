@@ -53,7 +53,8 @@ Start with the [project README](../README.md) for the tagline, install, and the
 ## Roadmap
 
 - **[Roadmap](roadmap/README.md)** — what's next, including
-  **[v2.0.0 — procedural-object migration](roadmap/v2.0.0.md)**: PL/SQL → PL/pgSQL
-  auto-translation plus AI-assisted live-rewrite with on-the-fly testing, falling
-  back to a detailed refactoring-effort estimate for objects that can't be
-  migrated mechanically.
+  **[v2.0.0 — AI-native procedural migration](roadmap/v2.0.0.md)**: connect an LLM
+  (Ollama / RESTful) that analyzes each object + its dependencies, adapts it to the
+  target dialect, tests it in an ephemeral metadata-only sandbox, and migrates
+  working code (with a refactoring-effort estimate as the fallback). A deterministic
+  PL/SQL→PL/pgSQL transpiler is treated as obsolete in the AI era.
