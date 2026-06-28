@@ -58,7 +58,7 @@ def probe_capabilities(conn: "psycopg.Connection", banner: str) -> CapabilityMat
     # Concurrent write transactions: the Apache editions (Nano/Lite) block rather
     # than error on a second concurrent writer, so probing for it would risk the
     # hang itself. Derive it from the edition (the one capability we don't probe).
-    cm.concurrent_writes = supports_concurrent_writes(cm.edition)
+    cm.concurrent_writes = supports_concurrent_writes(cm.edition, cm.server_version)
 
     prev_autocommit = conn.autocommit
     conn.autocommit = True
