@@ -77,6 +77,25 @@ def run_extract(cfg, name: str) -> Dict[str, object]:  # type: ignore[no-untyped
             return {"captured": captured, "watermark": new_pos,
                     "since": since or "(current)", "skipped": [], "mode": "binlog"}
 
+        if cfg.source.dialect is SourceDialect.POSTGRESQL:
+            # Log-based capture via PostgreSQL logical decoding (test_decoding):
+            # real I/U/D, deletes included. Peek -> persist to trail -> advance the
+            # slot, so a crash re-reads rather than loses changes. The slot is the
+            # durable server-side cursor; we mirror its LSN into the pos file for
+            # display + `a2h status`.
+            from .sources.postgres_logical import PostgresLogicalSource
+
+            source = PostgresLogicalSource(adapter, schema_name, schema_ir.tables, name)
+            records, new_lsn, skipped = source.capture()
+            captured = trail.append(records)
+            source.advance(new_lsn)
+            posf = _binlog_pos_file(cfg, name)
+            os.makedirs(os.path.dirname(posf), exist_ok=True)
+            with open(posf, "w") as f:
+                f.write(new_lsn)
+            return {"captured": captured, "watermark": new_lsn or "(slot)",
+                    "since": "(slot)", "skipped": skipped, "mode": "logical"}
+
         # Default: Oracle SCN-watermark capture.
         source = OracleScnSource(adapter, schema_name, schema_ir.tables)
         records, new_watermark, skipped = source.capture(ext.watermark)

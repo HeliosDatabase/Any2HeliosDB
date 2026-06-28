@@ -15,6 +15,7 @@ gap for the rest.
 from __future__ import annotations
 
 import abc
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -62,6 +63,12 @@ class CapabilityMatrix:
     returning: bool = False
     on_conflict: bool = False
     merge: bool = False
+    # Whether the target services concurrent write transactions. The Apache
+    # editions (Nano/Lite) do not: a second concurrent writer *blocks* (it does
+    # not error) until the first commits, which would hang the loader's parallel
+    # pass indefinitely. Edition-derived, not probed: a probe would have to risk
+    # the very hang it is testing for. Drives serial loading on those targets.
+    concurrent_writes: bool = True
     # Functions / procedural
     has_version_function: bool = False
     gen_random_uuid: bool = False
@@ -103,6 +110,32 @@ def detect_edition(banner: str) -> Edition:
     if "postgres" in b:
         return Edition.POSTGRES
     return Edition.UNKNOWN
+
+
+# Nano gained working concurrent write transactions in 3.60.7 (the same-row
+# write-conflict 60s-stall fix). Older Nano — and Lite, which still lacks it —
+# must serialize the parallel load.
+_NANO_CONCURRENT_WRITES_MIN = (3, 60, 7)
+_SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def supports_concurrent_writes(edition: Edition, server_version: str = "") -> bool:
+    """Whether *edition* (at *server_version*) services concurrent write txns.
+
+    Full and stock PostgreSQL always do. Lite never does. Nano did not until
+    **3.60.7** — before that a second concurrent writer stalled, so a parallel
+    load hung; the loader serializes for Lite and pre-3.60.7 Nano. An unparseable
+    Nano version is treated as too-old (serialize) to stay safe. See
+    :attr:`CapabilityMatrix.concurrent_writes`.
+    """
+    if edition is Edition.LITE:
+        return False
+    if edition is Edition.NANO:
+        m = _SEMVER_RE.search(server_version or "")
+        if not m:
+            return False
+        return tuple(int(g) for g in m.groups()) >= _NANO_CONCURRENT_WRITES_MIN
+    return True
 
 
 class TargetDriver(abc.ABC):
