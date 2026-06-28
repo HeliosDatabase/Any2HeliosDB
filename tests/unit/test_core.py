@@ -102,13 +102,18 @@ def test_concurrent_writes_gated_by_edition():
     # so the loader must serialize there; Full and stock PostgreSQL can run parallel.
     from any2heliosdb.constants import Edition
     from any2heliosdb.target.base import supports_concurrent_writes
-    assert supports_concurrent_writes(Edition.NANO) is False
+    assert supports_concurrent_writes(Edition.NANO) is False        # version unknown -> serialize
     assert supports_concurrent_writes(Edition.LITE) is False
     assert supports_concurrent_writes(Edition.FULL) is True
     assert supports_concurrent_writes(Edition.POSTGRES) is True
     # Unknown targets are treated optimistically (the serial-retry pass still
     # recovers any chunk that fails under contention).
     assert supports_concurrent_writes(Edition.UNKNOWN) is True
+    # Nano gained concurrent write txns in 3.60.7; older Nano still serializes.
+    assert supports_concurrent_writes(Edition.NANO, "16.0 (HeliosDB Nano 3.60.7)") is True
+    assert supports_concurrent_writes(Edition.NANO, "16.0 (HeliosDB Nano 3.61.0)") is True
+    assert supports_concurrent_writes(Edition.NANO, "16.0 (HeliosDB Nano 3.60.6)") is False
+    assert supports_concurrent_writes(Edition.NANO, "16.0 (HeliosDB Nano 3.60.4)") is False
 
 
 def test_loader_serializes_when_target_lacks_concurrent_writes(tmp_path):

@@ -15,6 +15,7 @@ gap for the rest.
 from __future__ import annotations
 
 import abc
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -111,15 +112,30 @@ def detect_edition(banner: str) -> Edition:
     return Edition.UNKNOWN
 
 
-def supports_concurrent_writes(edition: Edition) -> bool:
-    """Whether *edition* services concurrent write transactions.
+# Nano gained working concurrent write transactions in 3.60.7 (the same-row
+# write-conflict 60s-stall fix). Older Nano — and Lite, which still lacks it —
+# must serialize the parallel load.
+_NANO_CONCURRENT_WRITES_MIN = (3, 60, 7)
+_SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
-    The Apache editions (Nano/Lite) block — rather than error — on a second
-    concurrent writer until the first commits, so a parallel load there would
-    hang. The loader serializes when this is False. See
+
+def supports_concurrent_writes(edition: Edition, server_version: str = "") -> bool:
+    """Whether *edition* (at *server_version*) services concurrent write txns.
+
+    Full and stock PostgreSQL always do. Lite never does. Nano did not until
+    **3.60.7** — before that a second concurrent writer stalled, so a parallel
+    load hung; the loader serializes for Lite and pre-3.60.7 Nano. An unparseable
+    Nano version is treated as too-old (serialize) to stay safe. See
     :attr:`CapabilityMatrix.concurrent_writes`.
     """
-    return edition not in (Edition.NANO, Edition.LITE)
+    if edition is Edition.LITE:
+        return False
+    if edition is Edition.NANO:
+        m = _SEMVER_RE.search(server_version or "")
+        if not m:
+            return False
+        return tuple(int(g) for g in m.groups()) >= _NANO_CONCURRENT_WRITES_MIN
+    return True
 
 
 class TargetDriver(abc.ABC):
