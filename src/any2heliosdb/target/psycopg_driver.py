@@ -274,6 +274,12 @@ class PsycopgDriver(TargetDriver):
         materialized = [tuple(k) for k in keys]
         if not materialized:
             return 0
+        # Return rows ACTUALLY deleted (summed cur.rowcount), not the number of
+        # keys attempted. A target that silently no-ops a delete (e.g. a build whose
+        # DELETE predicate fails to match while SELECT does) then surfaces as a
+        # count shortfall the caller/validation can catch, instead of a false
+        # "deleted N". rowcount is -1 only when the server reports no tag count.
+        deleted = 0
         table = sql.SQL(quote_table(target_table))
         with self.conn.transaction():
             with self.conn.cursor() as cur:
@@ -282,7 +288,9 @@ class PsycopgDriver(TargetDriver):
                         sql.SQL("{} = {}").format(sql.Identifier(kc), sql.Literal(v))
                         for kc, v in zip(key_cols, k))
                     cur.execute(sql.SQL("DELETE FROM {} WHERE {}").format(table, conds))
-        return len(materialized)
+                    if cur.rowcount and cur.rowcount > 0:
+                        deleted += cur.rowcount
+        return deleted
 
     def truncate(self, target_table: str) -> None:
         self.execute("TRUNCATE TABLE {}".format(quote_table(target_table)))

@@ -1,0 +1,18 @@
+[source]
+dialect      = "postgresql"
+host         = "127.0.0.1"
+port         = 45432
+database     = "pagila_cdc_demo"
+schema       = "public"
+user         = "postgres"
+password_env = "PG_PW"
+[target]
+driver = "psycopg"
+host   = "127.0.0.1"
+port   = 55432
+dbname = "heliosdb"
+user   = "postgres"
+[options]
+output_dir    = "/tmp/a2h-cast-demo/out-cdc"
+parallelism   = 1
+drop_existing = true

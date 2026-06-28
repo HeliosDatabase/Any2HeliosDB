@@ -1,0 +1,30 @@
+[source]
+dialect="oracle"
+host="127.0.0.1"
+port=1521
+service_name="XEPDB1"
+user="hr"
+password_env="ORA_PW"
+schema="HR"
+
+[target]
+driver="psycopg"
+host="127.0.0.1"
+port=55436
+dbname="heliosdb"
+user="postgres"
+
+[options]
+output_dir="/tmp/a2h-cast-oracle-cdc/out"
+parallelism=1
+drop_existing=true
+
+# Integer-keyed columns: map Oracle NUMBER(p,0) -> BIGINT on the target.
+# These are PKs / FKs (DEPT_ID, EMP_ID, ID) the CDC delete-reconcile keys on.
+# BIGINT is the semantically-correct target for integer keys (no fractional loss)
+# and keeps the delete-by-key WHERE predicate on a true integer column.
+[modify_type]
+"hr.employees.emp_id"   = "bigint"
+"hr.employees.dept_id"  = "bigint"
+"hr.departments.dept_id"= "bigint"
+"hr.types_test.id"      = "bigint"

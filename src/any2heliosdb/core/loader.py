@@ -37,7 +37,8 @@ class LoadStats:
 
 class ResumableLoader:
     def __init__(self, cfg, schema, manifest_path, run_id, parallelism=4,
-                 use_copy=True, preserve_case=False, fresh=False):  # type: ignore[no-untyped-def]
+                 use_copy=True, preserve_case=False, fresh=False,
+                 concurrent_writes=True):  # type: ignore[no-untyped-def]
         self.cfg = cfg
         self.schema = schema
         self.manifest_path = manifest_path
@@ -45,6 +46,11 @@ class ResumableLoader:
         self.parallelism = max(1, int(parallelism))
         self.use_copy = use_copy
         self.preserve_case = preserve_case
+        # Whether the target services concurrent write transactions. The Apache
+        # editions (Nano/Lite) block — not error — on a second concurrent writer,
+        # so a parallel load there would hang forever (the serial-retry mop-up
+        # would never be reached). When False the load is serial from the start.
+        self.concurrent_writes = bool(concurrent_writes)
         # fresh=True (a drop_existing migrate) clears prior chunk state so the
         # recreated tables are reloaded instead of skipped as already-LOADED.
         self.fresh = fresh
@@ -125,17 +131,25 @@ class ResumableLoader:
         if not self._chunks:
             self.plan()
         self._errors: Dict[str, str] = {}
+        self._notes: List[str] = []
 
-        # First pass honors the requested parallelism. The serial retry pass mops
-        # up any chunk that failed only under contention -- some targets (e.g.
-        # HeliosDB-Lite today) don't support concurrent transactions, so a chunk
-        # can fail in parallel yet succeed serially. Chunks are idempotent
-        # (DELETE-range-then-load in one txn), so a retry never duplicates.
-        self._load_pending(parallel=True)
-        if self.parallelism > 1:
+        # Targets that don't service concurrent write transactions (Nano/Lite, the
+        # Apache editions) *block* on a second concurrent writer instead of erroring,
+        # which would hang the parallel pass indefinitely. Load them serially from
+        # the start. Stock PostgreSQL and HeliosDB-Full run the parallel pass, then
+        # a serial mop-up retries any chunk that failed only under contention
+        # (chunks are idempotent — DELETE-range-then-load in one txn — so a retry
+        # never duplicates).
+        if self.parallelism > 1 and not self.concurrent_writes:
+            self._notes.append(
+                "target does not support concurrent write transactions; loaded "
+                "serially (parallelism={} not applied)".format(self.parallelism))
+        self._load_pending(parallel=self.concurrent_writes)
+        if self.parallelism > 1 and self.concurrent_writes:
             self._load_pending(parallel=False)
 
         stats = LoadStats()
+        stats.warnings = list(self._notes)
         man = Manifest(self.manifest_path)
         try:
             stats.rows = man.rows_by_table(self.run_id)

@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec docker run -i --rm --network host postgres:16 psql -h 127.0.0.1 -p 55436 -U postgres -d heliosdb "$@"
