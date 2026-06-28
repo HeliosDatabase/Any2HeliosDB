@@ -1,0 +1,21 @@
+# Any2HeliosDB — migrate the Pagila sample DB (PostgreSQL) into HeliosDB-Nano.
+[source]
+dialect      = "postgresql"
+host         = "127.0.0.1"
+port         = 45432
+database     = "pagila"
+schema       = "public"
+user         = "postgres"
+password_env = "PG_PW"
+
+[target]                       # HeliosDB-Nano 3.60.4 over the PostgreSQL wire
+driver = "psycopg"
+host   = "127.0.0.1"
+port   = 55432
+dbname = "heliosdb"
+user   = "postgres"            # trust auth on this disposable Nano
+
+[options]
+output_dir    = "/tmp/a2h-cast-demo/out"
+parallelism   = 1
+drop_existing = true

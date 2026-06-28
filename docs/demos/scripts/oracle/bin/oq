@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec docker exec -i a2h-oracle sqlplus -S hr/hr@XEPDB1 "$@"
