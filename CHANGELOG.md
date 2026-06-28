@@ -3,6 +3,36 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-06-28
+
+### Added
+- **PostgreSQL logical-decoding CDC source** (`cdc/sources/postgres_logical.py`):
+  true log-based change capture via the built-in `test_decoding` plugin, read over
+  plain SQL (peek → persist to trail → advance the slot, so a crash re-reads
+  rather than loses changes). Emits real INSERT/UPDATE/**DELETE** records, so the
+  source-agnostic replicat applies deletes natively — enabling zero-downtime
+  PostgreSQL → HeliosDB CDC migration.
+- **Parallel data load on HeliosDB-Nano ≥ 3.60.7** — the release that fixes Nano's
+  concurrent-write stall. Older Nano and Lite continue to load serially
+  automatically.
+- asciinema demo casts under `docs/demos/` — Pagila (PostgreSQL) and Oracle, each
+  a one-shot migrate and a zero-downtime CDC migration.
+
+### Fixed
+- The parallel loader no longer hangs on targets that block concurrent write
+  transactions (older Nano / Lite): it serializes the load automatically, with a
+  warning, instead of deadlocking.
+- `PsycopgDriver.delete_keys` now returns the rows **actually** deleted (summed
+  `rowcount`) rather than the number of keys attempted, so a target that silently
+  no-ops a delete surfaces as a count shortfall the validation can catch.
+
+### Notes
+- Re-validated end-to-end against **HeliosDB-Nano 3.60.7**, which resolves five
+  engine issues surfaced by a2h (concurrent-write stall, multi-table DROP,
+  timestamptz→TIMESTAMP cast, DECIMAL-PK DELETE, BYTEA NUL handling). a2h's CDC
+  timestamp normalization is retained for compatibility with older CDC-capable
+  Nano (≥ 3.58.5).
+
 ## [1.0.0] — 2026-06-26
 
 First stable release. The v1.0.0 primary target — fully migrate **Oracle →
