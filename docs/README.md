@@ -50,6 +50,14 @@ Start with the [project README](../README.md) for the tagline, install, and the
   automatically vs. is surfaced for review (routines, triggers, materialized
   views, partitioning), and the v2.0.0 auto-translation roadmap.
 
+## Project
+
+- **[Development history](development-history.md)** — the engineering journey:
+  the phases (Foundations → v1.1.0), milestones, and the design decisions that paid
+  off, distilled from ~120 commits.
+- **[Demo casts](demos/)** — recorded asciinema migrations (Pagila & Oracle →
+  HeliosDB-Nano, one-shot migrate + zero-downtime CDC).
+
 ## Roadmap
 
 - **[Roadmap](roadmap/README.md)** — what's next, including
