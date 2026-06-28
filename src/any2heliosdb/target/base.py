@@ -62,6 +62,12 @@ class CapabilityMatrix:
     returning: bool = False
     on_conflict: bool = False
     merge: bool = False
+    # Whether the target services concurrent write transactions. The Apache
+    # editions (Nano/Lite) do not: a second concurrent writer *blocks* (it does
+    # not error) until the first commits, which would hang the loader's parallel
+    # pass indefinitely. Edition-derived, not probed: a probe would have to risk
+    # the very hang it is testing for. Drives serial loading on those targets.
+    concurrent_writes: bool = True
     # Functions / procedural
     has_version_function: bool = False
     gen_random_uuid: bool = False
@@ -103,6 +109,17 @@ def detect_edition(banner: str) -> Edition:
     if "postgres" in b:
         return Edition.POSTGRES
     return Edition.UNKNOWN
+
+
+def supports_concurrent_writes(edition: Edition) -> bool:
+    """Whether *edition* services concurrent write transactions.
+
+    The Apache editions (Nano/Lite) block — rather than error — on a second
+    concurrent writer until the first commits, so a parallel load there would
+    hang. The loader serializes when this is False. See
+    :attr:`CapabilityMatrix.concurrent_writes`.
+    """
+    return edition not in (Edition.NANO, Edition.LITE)
 
 
 class TargetDriver(abc.ABC):
