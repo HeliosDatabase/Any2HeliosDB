@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .base import CapabilityMatrix, detect_edition
+from .base import CapabilityMatrix, detect_edition, supports_concurrent_writes
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import psycopg
@@ -55,6 +55,10 @@ def probe_capabilities(conn: "psycopg.Connection", banner: str) -> CapabilityMat
     cm = CapabilityMatrix(raw_banner=banner)
     cm.server_version = banner
     cm.edition = detect_edition(banner)
+    # Concurrent write transactions: the Apache editions (Nano/Lite) block rather
+    # than error on a second concurrent writer, so probing for it would risk the
+    # hang itself. Derive it from the edition (the one capability we don't probe).
+    cm.concurrent_writes = supports_concurrent_writes(cm.edition)
 
     prev_autocommit = conn.autocommit
     conn.autocommit = True
@@ -167,6 +171,7 @@ def probe_capabilities(conn: "psycopg.Connection", banner: str) -> CapabilityMat
         "gen_random_uuid": cm.gen_random_uuid,
         "copy_from_stdin": cm.copy_from_stdin,
         "copy_binary": cm.copy_binary,
+        "concurrent_writes": cm.concurrent_writes,
         "on_conflict": cm.on_conflict,
         "returning": cm.returning,
         "merge": cm.merge,

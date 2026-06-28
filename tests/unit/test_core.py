@@ -97,6 +97,49 @@ def test_detect_edition_classifies_helios_and_stock_postgres():
     assert detect_edition("") is Edition.UNKNOWN
 
 
+def test_concurrent_writes_gated_by_edition():
+    # The Apache editions (Nano/Lite) can't service concurrent write transactions,
+    # so the loader must serialize there; Full and stock PostgreSQL can run parallel.
+    from any2heliosdb.constants import Edition
+    from any2heliosdb.target.base import supports_concurrent_writes
+    assert supports_concurrent_writes(Edition.NANO) is False
+    assert supports_concurrent_writes(Edition.LITE) is False
+    assert supports_concurrent_writes(Edition.FULL) is True
+    assert supports_concurrent_writes(Edition.POSTGRES) is True
+    # Unknown targets are treated optimistically (the serial-retry pass still
+    # recovers any chunk that fails under contention).
+    assert supports_concurrent_writes(Edition.UNKNOWN) is True
+
+
+def test_loader_serializes_when_target_lacks_concurrent_writes(tmp_path):
+    # Regression for the Nano "parallel load hangs" issue: with concurrent_writes
+    # False the loader must NOT run the parallel pass (which would block forever on
+    # Nano's second concurrent writer) — it loads serially and records a note.
+    from any2heliosdb.core.loader import ResumableLoader
+    calls = []
+    loader = ResumableLoader(cfg=None, schema=None,
+                             manifest_path=str(tmp_path / "m.sqlite"), run_id="r1",
+                             parallelism=8, concurrent_writes=False)
+    loader._chunks = {"c0": object()}        # non-empty => run() skips plan()
+    loader._load_pending = lambda parallel: calls.append(parallel)  # type: ignore
+    stats = loader.run()
+    assert calls == [False], "expected a single serial pass, got {}".format(calls)
+    assert any("concurrent write" in w for w in stats.warnings)
+
+
+def test_loader_parallel_then_serial_mopup_when_supported(tmp_path):
+    # Stock PG / Full: parallel pass first, then the serial mop-up retry.
+    from any2heliosdb.core.loader import ResumableLoader
+    calls = []
+    loader = ResumableLoader(cfg=None, schema=None,
+                             manifest_path=str(tmp_path / "m.sqlite"), run_id="r1",
+                             parallelism=8, concurrent_writes=True)
+    loader._chunks = {"c0": object()}
+    loader._load_pending = lambda parallel: calls.append(parallel)  # type: ignore
+    loader.run()
+    assert calls == [True, False], "expected parallel then serial mop-up, got {}".format(calls)
+
+
 def test_portable_view_translates_only_on_pg_wire_path():
     from any2heliosdb.core.catalog_model import View
     from any2heliosdb.core.orchestrator import _portable_view
