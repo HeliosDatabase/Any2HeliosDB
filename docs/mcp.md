@@ -79,6 +79,37 @@ a2h mcp serve --transport http --tokens-file ./tokens.txt
 > an open relay). stdio is a trusted local launch and is granted a role via
 > `--stdio-role` (default `admin`).
 
+### Generating a token file — `a2h mcp auth`
+
+Rather than hand-write the file (and risk leaking a token through your shell
+history), let a2h generate a cryptographically-strong token straight into a
+private file:
+
+```bash
+# generate an admin token in the default file (~/.config/a2h/mcp-tokens), mode 0600
+a2h mcp auth --role admin
+
+# pick a role + path; --show also prints the raw token (otherwise it stays in the file)
+a2h mcp auth --role operator --file ./tokens.txt --show
+
+# add another token to the same file (append by default), or --rotate to replace all
+a2h mcp auth --role viewer
+```
+
+The file is created **`0600`** (owner-only) and contains the `token:role` lines
+`--tokens-file` reads — keeping the secret off the command line and out of the
+project config. The default path is `$A2H_MCP_TOKENS_FILE` if set, else
+`~/.config/a2h/mcp-tokens`. The raw token lives only in the file; a client takes
+it as the first `:`-field of a line:
+
+```bash
+a2h mcp serve --tokens-file ~/.config/a2h/mcp-tokens            # server reads it
+TOKEN=$(cut -d: -f1 ~/.config/a2h/mcp-tokens | head -1)         # client reads it
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/mcp -d '{...}'
+```
+
+Keep the file out of version control — it grants the role it encodes.
+
 ## RBAC (roles)
 
 Roles form a strict hierarchy — a higher role inherits every permission below
