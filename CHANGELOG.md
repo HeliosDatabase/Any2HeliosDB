@@ -3,6 +3,16 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **`a2h mcp auth`** — generate a cryptographically-strong Bearer token straight
+  into a private (`0600`) token file the MCP server reads (`--tokens-file` /
+  `$A2H_MCP_TOKENS_FILE`, default `~/.config/a2h/mcp-tokens`). Keeps the secret off
+  the command line and out of the project config; supports `--role`, append vs
+  `--rotate`, and `--show`. (The MCP server was already HTTP + Bearer + RBAC and
+  refuses to start on HTTP with no tokens.)
+
 ## [1.1.0] — 2026-06-28
 
 ### Added
