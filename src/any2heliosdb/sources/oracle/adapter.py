@@ -1,4 +1,11 @@
-"""Oracle source adapter (python-oracledb, thin mode).
+"""Oracle source adapter (python-oracledb).
+
+Connects in **thin mode by default** — pure-Python, no Oracle Instant Client, no
+external dependencies (the preferred, lightweight path). **Thick mode** (Instant
+Client) is available opt-in (``[source] thick = true``) for the one case thin mode
+can't serve: servers that mandate **Native Network Encryption / Data Integrity**
+(thin mode raises DPY-3001). ``[source] sysdba = true`` connects with SYSDBA (for
+the SYS user).
 
 Introspects the Oracle data dictionary (``ALL_*`` views, owner-filtered) into the
 canonical IR and streams table data for the loader. LOBs are fetched as
@@ -41,6 +48,51 @@ from ...core.catalog_model import (
 from ...errors import IntrospectionError, SourceConnectionError
 from ..base import SourceAdapter, SourceDsn
 from ...typemap.defaults import map_oracle_type
+
+_thick_inited = False
+
+
+def _init_thick_mode(client_dir: Optional[str]) -> None:
+    """Enable python-oracledb thick mode (Oracle Instant Client), once per process.
+
+    Thick mode is required to reach Oracle servers that mandate Native Network
+    Encryption / Data Integrity (thin mode raises DPY-3001). The Instant Client
+    must be installed; ``client_dir`` points at its lib dir, else it is found via
+    PATH / LD_LIBRARY_PATH. Raises a clear :class:`SourceConnectionError` if the
+    client can't be loaded.
+    """
+    global _thick_inited
+    if _thick_inited:
+        return
+    import oracledb
+    try:
+        oracledb.init_oracle_client(lib_dir=client_dir or None)
+        _thick_inited = True
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "already" in msg.lower():  # initialized elsewhere — fine
+            _thick_inited = True
+            return
+        raise SourceConnectionError(
+            "could not enable Oracle thick mode (Instant Client): {}. Install the "
+            "Oracle Instant Client and set [source] client_dir to its lib directory "
+            "(or add it to LD_LIBRARY_PATH). Thick mode is required for servers that "
+            "mandate Native Network Encryption.".format(msg)) from e
+
+
+def _oracle_connect_hint(exc: Exception, dsn: SourceDsn) -> str:
+    """Wrap a connect failure with actionable guidance for the common cases."""
+    msg = str(exc)
+    base = "Oracle connect failed: {}".format(msg)
+    if "DPY-3001" in msg and not dsn.thick:
+        return (base + "\nHINT: this server mandates Native Network Encryption, which "
+                "needs python-oracledb THICK mode. Set [source] thick = true (and "
+                "install the Oracle Instant Client; optionally client_dir = "
+                "\"/path/to/instantclient\").")
+    if "ORA-28009" in msg or ("SYS" in (dsn.user or "").upper() and "as SYSDBA" in msg):
+        return (base + "\nHINT: connecting as SYS requires SYSDBA — set [source] "
+                "sysdba = true, or connect as a regular schema user instead.")
+    return base
 
 
 def _reconstruct_source_type(
@@ -106,21 +158,28 @@ class OracleAdapter(SourceAdapter):
         self._snapshot_scn: Optional[int] = None  # set via use_snapshot() for AS OF SCN reads
 
     def connect(self) -> None:
+        import os
         import oracledb  # lazy
 
         oracledb.defaults.fetch_lobs = False  # CLOB->str, BLOB->bytes
+        # Thick mode (Oracle Instant Client). Required for servers that mandate
+        # Native Network Encryption / Data Integrity — thin mode raises DPY-3001.
+        if self.dsn.thick or os.environ.get("A2H_ORACLE_THICK"):
+            _init_thick_mode(self.dsn.client_dir or os.environ.get("ORACLE_CLIENT_DIR"))
+
         if self.dsn.service_name:
             conn_dsn = "{}:{}/{}".format(self.dsn.host, self.dsn.port, self.dsn.service_name)
         elif self.dsn.sid:
             conn_dsn = oracledb.makedsn(self.dsn.host, self.dsn.port, sid=self.dsn.sid)
         else:
             conn_dsn = "{}:{}".format(self.dsn.host, self.dsn.port)
+        kw = {"user": self.dsn.user, "password": self.dsn.password, "dsn": conn_dsn}
+        if self.dsn.sysdba:
+            kw["mode"] = oracledb.AUTH_MODE_SYSDBA  # required for the SYS user
         try:
-            self._conn = oracledb.connect(
-                user=self.dsn.user, password=self.dsn.password, dsn=conn_dsn
-            )
+            self._conn = oracledb.connect(**kw)
         except Exception as e:  # noqa: BLE001
-            raise SourceConnectionError("Oracle connect failed: {}".format(e)) from e
+            raise SourceConnectionError(_oracle_connect_hint(e, self.dsn)) from e
 
     def close(self) -> None:
         if self._conn is not None:
