@@ -3,7 +3,7 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.0] — 2026-06-29
 
 ### Added
 - **`a2h mcp auth`** — generate a cryptographically-strong Bearer token straight
