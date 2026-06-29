@@ -41,6 +41,24 @@ No config at the path. Run `a2h wizard`, or pass `-c path/to/config.toml`.
 - The user needs read on the `ALL_*` data-dictionary views and `SELECT` on the
   schema's tables.
 
+**`DPY-3001: Native Network Encryption and Data Integrity is only supported in
+python-oracledb thick mode`** — the server mandates Oracle Native Network
+Encryption (NNE), which a2h's default **thin** mode (pure-Python) cannot do. Switch
+that source to **thick mode**: install the Oracle Instant Client and set
+
+```toml
+[source]
+thick = true
+# client_dir = "/opt/oracle/instantclient_21_13"   # if not on LD_LIBRARY_PATH
+```
+
+(or export `A2H_ORACLE_THICK=1` and `ORACLE_CLIENT_DIR=…`). Thin mode remains the
+default for every server that doesn't require NNE.
+
+**`ORA-28009: connection as SYS should be as SYSDBA or SYSOPER`** — connecting as
+the `SYS` user needs SYSDBA. Set `[source] sysdba = true`, or (better) connect as a
+regular schema user with read on `ALL_*` + `SELECT` on the tables.
+
 ### Target connect fails / `fe_sendauth: no password supplied`
 
 If a trust-mode connect is rejected, supply *any* password via `password_env`, or
