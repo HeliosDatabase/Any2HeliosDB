@@ -17,6 +17,7 @@ role required; :func:`Role.can` answers whether a caller's role clears that bar.
 from __future__ import annotations
 
 import os
+import secrets
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional
@@ -177,3 +178,47 @@ class TokenAuthenticator:
     def authenticate_header(self, authorization: Optional[str]) -> Principal:
         """Convenience: extract the bearer token then authenticate it."""
         return self.authenticate(self.extract_bearer(authorization))
+
+
+# --- token generation / token-file management (a2h mcp auth) -----------------
+
+def generate_token(nbytes: int = 32) -> str:
+    """A cryptographically-strong, URL-safe Bearer token (no ``:`` so it never
+    collides with the ``token:role`` field separator)."""
+    return secrets.token_urlsafe(nbytes)
+
+
+def default_tokens_file(environ: Optional[Dict[str, str]] = None) -> str:
+    """The token file a2h reads/writes by default: ``$A2H_MCP_TOKENS_FILE`` if set,
+    else ``~/.config/a2h/mcp-tokens``."""
+    env = os.environ if environ is None else environ
+    return env.get(ENV_TOKENS_FILE) or os.path.join(
+        os.path.expanduser("~"), ".config", "a2h", "mcp-tokens")
+
+
+def write_token_file(path: str, token: str, role: Role, *, append: bool = True) -> None:
+    """Write ``token:role`` to *path* as a private tokens file the server reads.
+
+    The file is created with ``0600`` and its parent dir with ``0700`` (best
+    effort) so the secret is never world-readable — the whole point of keeping
+    tokens in a file instead of on the command line or in the project config.
+    Appends by default (multiple tokens coexist); ``append=False`` truncates
+    first (rotation). The line format round-trips through :func:`load_tokens`.
+    """
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+        try:
+            os.chmod(parent, 0o700)
+        except OSError:  # pragma: no cover - best effort on exotic filesystems
+            pass
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC)
+    fd = os.open(path, flags, 0o600)  # 0600 from creation — no world-readable window
+    try:
+        os.write(fd, "{}:{}\n".format(token, role.value).encode("utf-8"))
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(path, 0o600)  # enforce 0600 even if the file pre-existed
+    except OSError:  # pragma: no cover
+        pass

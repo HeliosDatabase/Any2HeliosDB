@@ -541,6 +541,52 @@ def mcp_serve(
         console.print("\nstopped")
 
 
+@mcp_app.command("auth")
+def mcp_auth(
+    role: str = typer.Option("admin", "--role", "-r",
+        help="Role this token grants: viewer | operator | admin."),
+    file: Optional[str] = typer.Option(None, "--file", "-f",
+        help="Token file to write (default: $A2H_MCP_TOKENS_FILE or ~/.config/a2h/mcp-tokens)."),
+    rotate: bool = typer.Option(False, "--rotate",
+        help="Replace the file's contents instead of appending a new token."),
+    show: bool = typer.Option(False, "--show",
+        help="Also print the raw token (otherwise it stays only in the file)."),
+) -> None:
+    """Generate a Bearer token and store it in a private (0600) token file.
+
+    The same file is what the server reads (`a2h mcp serve --tokens-file <file>`,
+    or set $A2H_MCP_TOKENS_FILE) and where the secret lives for clients — keeping
+    it off the command line and out of the project config. Clients authenticate
+    with `Authorization: Bearer <token>`.
+    """
+    from .mcp.auth import (Role, _fingerprint, default_tokens_file,
+                           generate_token, write_token_file)
+
+    try:
+        r = Role(role.strip().lower())
+    except ValueError:
+        _fail("unknown role {!r} (valid: {})".format(
+            role, ", ".join(x.value for x in Role)))
+    path = file or default_tokens_file()
+    token = generate_token()
+    write_token_file(path, token, r, append=not rotate)
+
+    console.print("[green]wrote[/green] a [bold]{}[/bold] token to [bold]{}[/bold] "
+                  "(mode 0600{})".format(r.value, path, "" if rotate else ", appended"))
+    console.print("  fingerprint: {}".format(_fingerprint(token)))
+    if show:
+        console.print("  token: [bold]{}[/bold]".format(token))
+    else:
+        console.print("  [dim](the raw token stays in the file; re-run with --show to "
+                      "print it)[/dim]")
+    console.print("\n[bold]Serve[/bold] with this file:")
+    console.print("  [cyan]a2h mcp serve --tokens-file {}[/cyan]".format(path))
+    console.print("[bold]Clients[/bold] send:  [cyan]Authorization: Bearer <token>[/cyan]"
+                  "   [dim](token = first ':'-field of a line in the file)[/dim]")
+    console.print("[yellow]Keep this file secret[/yellow] — it grants {} access; do not "
+                  "commit it.".format(r.value))
+
+
 def main() -> None:
     """Console-script entrypoint: render tool errors cleanly instead of tracebacks."""
     from .errors import Any2HeliosError
