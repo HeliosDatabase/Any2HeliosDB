@@ -34,6 +34,10 @@ class SourceConfig:
     password_env: Optional[str] = None
     password: Optional[str] = None  # dev only
     schema: Optional[str] = None
+    # Oracle connection options (ignored for other dialects):
+    thick: bool = False             # python-oracledb thick mode (Instant Client) — for NNE servers
+    client_dir: Optional[str] = None  # Instant Client lib dir (else PATH/LD_LIBRARY_PATH)
+    sysdba: bool = False            # connect with SYSDBA privilege (the SYS user)
 
     def to_dsn(self) -> SourceDsn:
         return SourceDsn(
@@ -41,6 +45,7 @@ class SourceConfig:
             database=self.database, user=self.user,
             password=_resolve_password(self.password_env, self.password) or "",
             schema=self.schema,
+            thick=self.thick, client_dir=self.client_dir, sysdba=self.sysdba,
         )
 
 

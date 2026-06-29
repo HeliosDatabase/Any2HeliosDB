@@ -3,6 +3,17 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Oracle thick-mode + SYSDBA connection options.** `[source] thick = true` (with
+  optional `client_dir`, or env `$A2H_ORACLE_THICK` / `$ORACLE_CLIENT_DIR`) connects
+  through the Oracle Instant Client — required for servers that mandate **Native
+  Network Encryption / Data Integrity**, which thin mode cannot do (`DPY-3001`).
+  `[source] sysdba = true` connects with SYSDBA (for the `SYS` user). **Thin mode
+  (pure-Python, no client, no external deps) remains the default.** Oracle connect
+  failures now print an actionable hint for the NNE and SYS cases.
+
 ## [1.2.0] — 2026-06-29
 
 ### Added

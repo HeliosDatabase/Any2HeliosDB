@@ -26,6 +26,15 @@ class SourceDsn:
     user: str = ""
     password: str = ""
     schema: Optional[str] = None  # schema to migrate (defaults to the user's own)
+    # Oracle-only connection options:
+    #   thick      — use python-oracledb thick mode (Oracle Instant Client). Required
+    #                for servers that mandate Native Network Encryption / Data
+    #                Integrity (thin mode raises DPY-3001).
+    #   client_dir — Instant Client lib dir (else found via PATH/LD_LIBRARY_PATH).
+    #   sysdba     — connect with SYSDBA privilege (needed for the SYS user).
+    thick: bool = False
+    client_dir: Optional[str] = None
+    sysdba: bool = False
 
 
 class SourceAdapter(abc.ABC):
