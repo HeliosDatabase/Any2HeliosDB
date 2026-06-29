@@ -349,3 +349,46 @@ def test_missing_config_is_tool_error():
     payload = resp["result"]["structuredContent"]
     assert payload["ok"] is False
     assert "no config" in payload["error"].lower()
+
+
+# --- `a2h mcp auth`: token generation + private token file -------------------
+
+def test_generate_token_is_urlsafe_unique_and_separator_safe():
+    from any2heliosdb.mcp.auth import generate_token
+    t1, t2 = generate_token(), generate_token()
+    assert t1 and t2 and t1 != t2
+    assert ":" not in t1  # never collides with the token:role field separator
+
+
+def test_write_token_file_roundtrips_and_is_private(tmp_path):
+    import os
+    import stat
+    from any2heliosdb.mcp.auth import (Role, TokenAuthenticator, generate_token,
+                                       load_tokens, write_token_file)
+    path = str(tmp_path / "mcp-tokens")
+    t1 = generate_token()
+    write_token_file(path, t1, Role.OPERATOR)
+
+    # created 0600 (never world/group readable)
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    # the file the server reads accepts the token at the right role
+    assert load_tokens(tokens_file=path) == {t1: Role.OPERATOR}
+    assert TokenAuthenticator(load_tokens(tokens_file=path)).authenticate(t1).role is Role.OPERATOR
+
+    # append: a second token coexists
+    t2 = generate_token()
+    write_token_file(path, t2, Role.VIEWER)
+    assert load_tokens(tokens_file=path) == {t1: Role.OPERATOR, t2: Role.VIEWER}
+
+    # rotate (append=False) replaces with just the new token, staying 0600
+    t3 = generate_token()
+    write_token_file(path, t3, Role.ADMIN, append=False)
+    assert load_tokens(tokens_file=path) == {t3: Role.ADMIN}
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+def test_default_tokens_file_prefers_env_then_xdg():
+    import os
+    from any2heliosdb.mcp.auth import ENV_TOKENS_FILE, default_tokens_file
+    assert default_tokens_file({ENV_TOKENS_FILE: "/x/y/tokens"}) == "/x/y/tokens"
+    assert default_tokens_file({}).endswith(os.path.join(".config", "a2h", "mcp-tokens"))
