@@ -23,9 +23,19 @@ optional `[data_type]`, `[modify_type]`, and `[capability]`.
 | `password_env` | string | — | **Recommended.** Name of the env var holding the password (resolved at runtime). |
 | `password` | string | — | Literal password — dev convenience only; keep empty in committed configs. |
 | `schema` | string | — | Schema to migrate. Blank = the connecting user's own schema (upper-cased internally). |
+| `thick` | bool | `false` | **Oracle**: use python-oracledb **thick mode** (Oracle Instant Client). Default is **thin mode** — pure-Python, no client, no external deps. Enable only for servers that mandate **Native Network Encryption** (thin mode can't do NNE → `DPY-3001`). |
+| `client_dir` | string | — | **Oracle** (thick): Instant Client lib directory. Omit to find it via `PATH` / `LD_LIBRARY_PATH`. |
+| `sysdba` | bool | `false` | **Oracle**: connect with SYSDBA privilege (required for the `SYS` user). |
 
 For Oracle, set exactly one of `service_name` or `sid`. The DSN built is
 `host:port/service_name`, or `makedsn(host, port, sid=…)`, or bare `host:port`.
+
+By default a2h connects in **thin mode** (pure-Python, no Oracle client — the
+lightweight, dependency-free path). Set `thick = true` **only** if the server
+mandates Native Network Encryption / Data Integrity, which thin mode cannot do;
+that path needs the Oracle Instant Client installed (point `client_dir` at it, or
+put it on `LD_LIBRARY_PATH`). The env vars `A2H_ORACLE_THICK=1` and
+`ORACLE_CLIENT_DIR=…` are honored as an alternative to the config keys.
 
 ## `[target]`
 

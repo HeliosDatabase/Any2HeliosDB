@@ -71,6 +71,8 @@ def load_config(path: str) -> ProjectConfig:
         database=src.get("database"), user=src.get("user", ""),
         password_env=src.get("password_env"), password=src.get("password"),
         schema=src.get("schema"),
+        thick=bool(src.get("thick", False)), client_dir=src.get("client_dir"),
+        sysdba=bool(src.get("sysdba", False)),
     )
     target = TargetConfig(
         driver=TargetDriverKind(tgt.get("driver", "psycopg")),
