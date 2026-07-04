@@ -92,6 +92,56 @@ def _portable_view(view, dialect, capabilities, bool_cols=()):  # type: ignore[n
     return view, notes
 
 
+def _order_views(views):  # type: ignore[no-untyped-def]
+    """Order views so each is emitted AFTER every other view it references.
+
+    Both PostgreSQL and HeliosDB require a view's referents to exist at CREATE
+    time, so a view that selects from another view must be created after it.
+    Dependencies are detected by a whole-word, case-insensitive occurrence of one
+    view's name in another's definition (a schema-qualified ``schema.v`` reference
+    still contains the bare name as a word); table references are ignored because
+    only view names are in the graph, and a view's reference to its own name (a
+    self/recursive view) is not a dependency. Views in a reference cycle — which
+    no engine accepts anyway — keep their original relative order. Stable:
+    independent views stay in source order.
+    """
+    n = len(views)
+    if n < 2:
+        return list(views)
+    lname = [v.name.lower() for v in views]
+    bodies = [(v.definition or "") for v in views]
+    patterns = [re.compile(r"\b" + re.escape(nm) + r"\b", re.IGNORECASE) for nm in lname]
+    # deps[i] = indices of the OTHER views that view i references
+    deps = []
+    for i in range(n):
+        d = set()
+        for j in range(n):
+            if j == i or lname[j] == lname[i]:
+                continue
+            if patterns[j].search(bodies[i]):
+                d.add(j)
+        deps.append(d)
+    # Kahn-style passes in original order (stable). Emit any view whose deps are
+    # all already emitted; repeat until no progress.
+    emitted: set = set()
+    resolved: List[int] = []
+    remaining = list(range(n))
+    progress = True
+    while remaining and progress:
+        progress = False
+        still = []
+        for i in remaining:
+            if deps[i] <= emitted:
+                resolved.append(i)
+                emitted.add(i)
+                progress = True
+            else:
+                still.append(i)
+        remaining = still
+    resolved.extend(remaining)  # any cycle: fall back to original relative order
+    return [views[i] for i in resolved]
+
+
 @dataclass
 class MigrateStats:
     tables: int = 0
@@ -316,7 +366,9 @@ def migrate(
     # --- views ---
     bool_cols = {c.name for t in src.tables for c in t.columns
                  if c.data_type.kind is DataTypeKind.BOOLEAN}
-    for v in src.views:
+    # Emit views in dependency order so a view that selects from another view is
+    # created after it (PG and HeliosDB both require the referent to exist).
+    for v in _order_views(src.views):
         # Drop-then-create so a re-run/resume re-applies the view cleanly instead
         # of warning that it already exists.
         try:

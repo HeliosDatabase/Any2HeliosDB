@@ -3,6 +3,36 @@
 All notable changes to Any2HeliosDB are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] — 2026-07-04
+
+### Added
+- **Topological view ordering on `export` and `migrate`.** Views are now emitted in
+  dependency order, so a view that selects from another view is created *after* its
+  referent — PostgreSQL and HeliosDB both require the referent to exist at CREATE
+  time. Previously views were emitted in source-catalog (typically name) order, so
+  a dependent view sorted ahead of its parent failed to create. Detection is by
+  whole-word view-name occurrence in each definition (schema-qualified references
+  included); self/recursive views aren't treated as a self-dependency, and any
+  reference cycle keeps its original order. Independent views stay in source order.
+- **Embedded HeliosDB-Nano as an optional manifest backend** (`[options]
+  manifest_backend = "nano"`). The resumable-load ledger — runs / tables / chunks /
+  watermarks — can now run on an in-process HeliosDB-Nano (RocksDB) store instead
+  of the stdlib `sqlite3` default, dogfooding the engine on a2h's own state. Opt in
+  with the `any2heliosdb[nano-manifest]` extra (`heliosdb-nano-embedded`); **SQLite
+  stays the zero-friction default** (no extra dependency). The SQLite manifest is a
+  file (`manifest.db`); the Nano manifest is a directory (`manifest.nano`), so the
+  two never collide and the backend is auto-detected on read.
+  - The multi-threaded loader opens a fresh ledger handle per chunk; since RocksDB
+    is single-writer, all writer handles in a process share one locked, refcounted
+    connection, while the target writes still parallelize. `a2h status` / `a2h
+    monitor` open read-only (auto-detecting the backend) and re-open per refresh so
+    the live monitor sees fresh progress while a migrate holds the writer.
+  - Manifest SQL is now portable across both backends (`ON CONFLICT` upserts;
+    `total_chunks` maintained by count-then-set rather than a subquery).
+  - Validated end-to-end: a real PostgreSQL → PostgreSQL migrate on the Nano
+    backend, plus a 1.2 M-row mid-load `SIGKILL` followed by `a2h resume` that
+    recovered and finished with zero duplicate rows.
+
 ## [1.3.0] — 2026-06-29
 
 ### Added
