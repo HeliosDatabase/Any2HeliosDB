@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "any2heliosdb"
-version = "1.3.0"
+version = "1.4.0"
 description = "Migrate Oracle / MySQL / PostgreSQL / SQL Server into HeliosDB or stock PostgreSQL — a modern, Python successor to Ora2Pg."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -55,8 +55,11 @@ mssql = ["pyodbc>=5.0"]
 # >= 3.10; on 3.9 the server falls back to a built-in, wire-compatible JSON-RPC
 # endpoint (stdlib only — no extra deps required to run it there).
 mcp = ["mcp>=1.0 ; python_version >= '3.10'"]
+# Use embedded HeliosDB-Nano (in-process) as the resumable-load ledger backend
+# instead of the stdlib sqlite3 default ([options] manifest_backend = "nano").
+nano-manifest = ["heliosdb-nano-embedded>=3.60.8"]
 all = ["oracledb>=2.0", "PyMySQL>=1.1", "mysql-replication>=1.0", "pyodbc>=5.0",
-       "mcp>=1.0 ; python_version >= '3.10'"]
+       "mcp>=1.0 ; python_version >= '3.10'", "heliosdb-nano-embedded>=3.60.8"]
 dev = ["pytest>=7", "pytest-cov", "ruff", "mypy"]
 
 [project.scripts]

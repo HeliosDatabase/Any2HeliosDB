@@ -113,7 +113,9 @@ def _run_context(cfg):  # type: ignore[no-untyped-def]
         cfg.source.host, cfg.source.port, cfg.source.schema or "",
         cfg.target.host, cfg.target.port, cfg.target.dbname)
     run_id = "run_" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:10]
-    return os.path.join(cfg.options.output_dir, "manifest.db"), run_id
+    from ..core.manifest import manifest_path_for
+    backend = getattr(cfg.options, "manifest_backend", "sqlite")
+    return manifest_path_for(cfg.options.output_dir, backend), run_id
 
 
 def _validation_to_dict(res) -> Dict[str, Any]:  # type: ignore[no-untyped-def]
@@ -208,7 +210,7 @@ def _h_status(args: Dict[str, Any]) -> Dict[str, Any]:
     if not os.path.exists(manifest_path):
         return {"ok": False, "exists": False, "manifest_path": manifest_path,
                 "message": "no manifest (run migrate first)"}
-    man = Manifest(manifest_path)
+    man = Manifest.open_readonly(manifest_path)
     try:
         summary = man.summary(run_id)
         pending = man.pending_chunks(run_id)

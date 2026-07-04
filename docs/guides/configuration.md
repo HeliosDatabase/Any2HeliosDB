@@ -57,12 +57,33 @@ put it on `LD_LIBRARY_PATH`). The env vars `A2H_ORACLE_THICK=1` and
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `output_dir` | string | `./migration_output` | Holds the resume `manifest.db`, the CDC registry `cdc.db`, and the per-extract `trail/`. |
+| `output_dir` | string | `./migration_output` | Holds the resume manifest (`manifest.db`, or `manifest.nano/` — see `manifest_backend`), the CDC registry `cdc.db`, and the per-extract `trail/`. |
 | `batch_size` | int | `1000` | Source fetch `arraysize`/`prefetchrows` and the INSERT-fallback batch size. |
 | `parallelism` | int | `4` | Number of parallel load workers; the loader aims for ~`parallelism × 2` chunks per table. |
 | `prefer_copy` | bool | `true` | Use COPY when the target's probe reports `copy_from_stdin`; otherwise INSERT. |
 | `preserve_case` | bool | `false` | `false` lowercases all identifiers (Ora2Pg `PRESERVE_CASE` off) so they stay unquoted; `true` keeps source case (quoted). |
 | `drop_existing` | bool | `true` | `DROP TABLE … CASCADE` before re-creating on `migrate` (ignored by `resume`). |
+| `manifest_backend` | string | `sqlite` | Resumable-load ledger store: `sqlite` (stdlib, zero-friction default) or `nano` (embedded HeliosDB-Nano, in-process). See below. |
+
+### `manifest_backend` — SQLite vs embedded Nano
+
+The crash-safe resume ledger (runs / tables / chunks / watermarks) defaults to a
+stdlib **SQLite** file at `<output_dir>/manifest.db` — no extra dependency, works
+everywhere. Setting `manifest_backend = "nano"` runs the same ledger on an
+**embedded HeliosDB-Nano** (RocksDB) store at `<output_dir>/manifest.nano` (a
+directory), which dogfoods the engine on a2h's own state. Install the backend with
+the extra:
+
+```bash
+pip install 'any2heliosdb[nano-manifest]'   # adds heliosdb-nano-embedded
+```
+
+Both backends are functionally identical — same resume, status, and live monitor.
+The backend is auto-detected on read (file ⇒ sqlite, directory ⇒ nano), so `a2h
+status` / `a2h monitor` / `a2h resume` need no extra flag. `migrate`, `status`,
+and `monitor` can run concurrently on the Nano backend: the loader holds the single
+RocksDB writer while read-only commands open their own read-only view. Keep
+`sqlite` unless you specifically want the embedded engine.
 
 ## Type overrides: `[data_type]` & `[modify_type]`
 
