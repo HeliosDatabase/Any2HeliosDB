@@ -76,6 +76,10 @@ class Options:
     prefer_copy: bool = True
     preserve_case: bool = False
     drop_existing: bool = True
+    # Resumable-load ledger backend: "sqlite" (stdlib, zero-friction default) or
+    # "nano" (embedded HeliosDB-Nano via the any2heliosdb[nano-manifest] extra —
+    # dogfoods the engine; the manifest becomes a RocksDB directory).
+    manifest_backend: str = "sqlite"
 
 
 @dataclass

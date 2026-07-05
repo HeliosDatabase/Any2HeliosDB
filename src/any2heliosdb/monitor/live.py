@@ -207,11 +207,18 @@ def run_monitor(manifest_path: str, run_id: str, interval: float = 1.0,
     if console is None:
         console = Console()
 
-    man = M.Manifest.open_readonly(manifest_path)
     start = time.monotonic()
 
     def snap():  # type: ignore[no-untyped-def]
-        return man.progress_snapshot(run_id)
+        # Reopen read-only each tick. A RocksDB read-only handle is pinned at
+        # open-time, so the embedded-Nano backend only sees fresh progress on a
+        # reopen; sqlite WAL is fine either way. The backend is auto-detected
+        # from the path. Cheap relative to the refresh interval.
+        man = M.Manifest.open_readonly(manifest_path)
+        try:
+            return man.progress_snapshot(run_id)
+        finally:
+            man.close()
 
     try:
         first = snap()
@@ -236,5 +243,3 @@ def run_monitor(manifest_path: str, run_id: str, interval: float = 1.0,
         return 0 if current.get("complete") else 1
     except KeyboardInterrupt:  # pragma: no cover - interactive only
         return 1
-    finally:
-        man.close()

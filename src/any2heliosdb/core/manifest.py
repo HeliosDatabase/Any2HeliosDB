@@ -1,4 +1,4 @@
-"""Durable run manifest / checkpoint store (SQLite-WAL).
+"""Durable run manifest / checkpoint store.
 
 Generalizes Ora2Pg's ``TABLES_SCN.log`` into a real ledger so an interrupted
 migration resumes without re-loading completed work. The unit of resume is the
@@ -9,15 +9,167 @@ Chunk state machine: ``pending → in_progress → loaded → verified`` (or
 safe because chunk application is idempotent (truncate-and-reload or staged
 merge), so a half-done chunk is simply redone.
 
-Uses only the standard library (``sqlite3``); WAL mode gives crash-safe
-per-transition commits across worker processes.
+**Backends.** The default is the standard library ``sqlite3`` (WAL mode,
+crash-safe, zero-dependency — a single ``manifest.db`` file). Optionally
+(``manifest_backend = "nano"``) the ledger runs on an **embedded HeliosDB-Nano**
+(``heliosdb-nano-embedded``, in-process — a ``manifest.db`` *directory*), which
+lets a2h dogfood its own database as its checkpoint store. The SQL is portable
+(``ON CONFLICT`` upserts); a thin connection adapter maps qmark params to ``$n``,
+dict rows to tuples, and ``commit()`` to ``flush()``. Read sites (``status`` /
+``monitor``) auto-detect the backend from the path (a Nano manifest is a dir).
 """
 from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+
+SQLITE = "sqlite"
+NANO = "nano"
+
+
+def detect_backend(path: str) -> str:
+    """A Nano manifest is a RocksDB *directory*; a SQLite manifest is a file."""
+    return NANO if os.path.isdir(path) else SQLITE
+
+
+def manifest_path_for(output_dir: str, backend: str = SQLITE) -> str:
+    """On-disk manifest location for a backend. SQLite is a single FILE
+    (``manifest.db``); the embedded-Nano backend is a RocksDB DIRECTORY
+    (``manifest.nano``). Distinct names mean the two never collide if a project
+    switches backends, and keep ``detect_backend`` unambiguous."""
+    return os.path.join(output_dir, "manifest.nano" if backend == NANO else "manifest.db")
+
+
+def _qmark_to_dollar(sql: str) -> str:
+    """Translate sqlite ``?`` placeholders to Nano ``$1..$n`` (positional). The
+    manifest SQL never puts ``?`` inside a string literal, so a plain scan is safe."""
+    out: List[str] = []
+    n = 0
+    for ch in sql:
+        if ch == "?":
+            n += 1
+            out.append("${}".format(n))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+class _NanoCursor:
+    """A sqlite3-cursor-shaped view over an embedded-Nano result, so the Manifest
+    code (``.fetchone()`` / ``.fetchall()`` / ``.rowcount``) is backend-agnostic."""
+
+    def __init__(self, rows: List[tuple], rowcount: int) -> None:
+        self._rows = rows
+        self.rowcount = rowcount
+
+    def fetchone(self):  # type: ignore[no-untyped-def]
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):  # type: ignore[no-untyped-def]
+        return list(self._rows)
+
+
+# Process-wide registry of shared embedded-Nano *writer* connections, keyed by
+# the absolute manifest path. RocksDB permits a single writer per directory, so
+# every Manifest RW handle to the same nano path in this process shares ONE
+# EmbeddedDatabase guarded by a re-entrant lock; the underlying DB is dropped
+# when the last handle closes (refcounted). This lets the multi-threaded loader
+# — which opens a fresh Manifest per chunk — use the nano backend safely: the
+# tiny ledger writes serialize on the lock while the target writes parallelize.
+_NANO_WRITERS: Dict[str, "_NanoShared"] = {}
+_NANO_WRITERS_LOCK = threading.Lock()
+
+
+class _NanoShared:
+    def __init__(self, db) -> None:  # type: ignore[no-untyped-def]
+        self.db = db
+        self.lock = threading.RLock()
+        self.refs = 0
+
+
+def _acquire_writer(path: str) -> "_NanoShared":
+    import heliosdb_nano  # optional extra: any2heliosdb[nano-manifest]
+
+    key = os.path.abspath(path)
+    with _NANO_WRITERS_LOCK:
+        shared = _NANO_WRITERS.get(key)
+        if shared is None:
+            os.makedirs(os.path.dirname(key), exist_ok=True)
+            shared = _NanoShared(heliosdb_nano.EmbeddedDatabase(key))
+            _NANO_WRITERS[key] = shared
+        shared.refs += 1
+        return shared
+
+
+def _release_writer(path: str) -> None:
+    key = os.path.abspath(path)
+    with _NANO_WRITERS_LOCK:
+        shared = _NANO_WRITERS.get(key)
+        if shared is None:
+            return
+        shared.refs -= 1
+        if shared.refs <= 0:
+            _NANO_WRITERS.pop(key, None)
+            shared.db = None  # drop -> RocksDB closes + releases the dir lock
+
+
+class _NanoConn:
+    """Adapts ``heliosdb_nano.EmbeddedDatabase`` to the small sqlite3.Connection
+    surface the Manifest uses (``execute`` returning a cursor, ``executescript``,
+    ``commit``, ``close``). RW handles share a process-wide, per-path writer
+    (RocksDB single-writer) guarded by a lock so the multi-threaded loader is
+    safe; RO handles (the live monitor / status — a separate process) open their
+    own independent read-only view. Lazy-imports the optional dependency."""
+
+    def __init__(self, path: str, readonly: bool = False) -> None:
+        self._ro = readonly
+        self._path = path
+        if readonly:
+            import heliosdb_nano  # optional extra: any2heliosdb[nano-manifest]
+
+            self._shared = None
+            self._lock = threading.RLock()
+            self._db = heliosdb_nano.EmbeddedDatabase.open_read_only(path)
+        else:
+            self._shared = _acquire_writer(path)
+            self._lock = self._shared.lock
+            self._db = self._shared.db
+
+    def execute(self, sql: str, params: tuple = ()):  # type: ignore[no-untyped-def]
+        nsql = _qmark_to_dollar(sql)
+        p = list(params)
+        with self._lock:
+            if sql.lstrip()[:6].upper() == "SELECT":
+                rows = self._db.query(nsql, p) if p else self._db.query(nsql)
+                return _NanoCursor([tuple(r.values()) for r in rows], len(rows))
+            affected = self._db.execute(nsql, p) if p else self._db.execute(nsql)
+            return _NanoCursor([], affected if isinstance(affected, int) else -1)
+
+    def executescript(self, script: str) -> None:
+        with self._lock:
+            for stmt in script.split(";"):
+                if stmt.strip():
+                    self._db.execute(stmt)
+
+    def commit(self) -> None:
+        # Persist + make committed rows visible to a fresh read-only open (the
+        # live monitor reopens per tick). No-op on a read-only handle.
+        if self._ro:
+            return
+        with self._lock:
+            try:
+                self._db.flush()
+            except Exception:  # pragma: no cover - flush is best-effort
+                pass
+
+    def close(self) -> None:
+        self._db = None
+        if not self._ro and self._shared is not None:
+            self._shared = None
+            _release_writer(self._path)
 
 PENDING = "pending"
 IN_PROGRESS = "in_progress"
@@ -64,10 +216,20 @@ class ChunkRow:
 
 
 class Manifest:
-    def __init__(self, path: str, readonly: bool = False) -> None:
+    def __init__(self, path: str, readonly: bool = False, backend: str = SQLITE) -> None:
         self.path = path
         self.readonly = readonly
-        if readonly:
+        self.backend = backend
+        if backend == NANO:
+            # Embedded HeliosDB-Nano (in-process). A read-only handle (RocksDB
+            # read-only open) takes no lock, so the live monitor can read while
+            # the loader holds the writer open. commit() flushes so a fresh
+            # read-only open sees the latest committed rows.
+            self._db = _NanoConn(path, readonly=readonly)
+            if not readonly:
+                self._db.executescript(_SCHEMA)
+                self._db.commit()
+        elif readonly:
             # Attach to an existing manifest a concurrent loader may be writing.
             # WAL permits one reader alongside the writer; open the connection
             # truly read-only (mode=ro URI) so we can never take a write lock or
@@ -84,12 +246,14 @@ class Manifest:
 
     @classmethod
     def open_readonly(cls, path: str) -> "Manifest":
-        """Open an existing manifest read-only (for the live monitor).
+        """Open an existing manifest read-only (for the live monitor / status).
 
-        Raises FileNotFoundError if the manifest does not exist yet."""
+        The backend is auto-detected from the path (a Nano manifest is a RocksDB
+        directory, a SQLite manifest is a file). Raises FileNotFoundError if the
+        manifest does not exist yet."""
         if not os.path.exists(path):
             raise FileNotFoundError(path)
-        return cls(path, readonly=True)
+        return cls(path, readonly=True, backend=detect_backend(path))
 
     def close(self) -> None:
         self._db.close()
@@ -98,8 +262,11 @@ class Manifest:
     def start_run(self, run_id: str, config_hash: str = "", fingerprint: str = "",
                   started_at: str = "") -> None:
         self._db.execute(
-            "INSERT OR REPLACE INTO runs (run_id, config_hash, source_fingerprint, started_at, status) "
-            "VALUES (?,?,?,?, 'running')",
+            "INSERT INTO runs (run_id, config_hash, source_fingerprint, started_at, status) "
+            "VALUES (?,?,?,?, 'running') "
+            "ON CONFLICT (run_id) DO UPDATE SET config_hash=excluded.config_hash, "
+            "source_fingerprint=excluded.source_fingerprint, started_at=excluded.started_at, "
+            "status=excluded.status",
             (run_id, config_hash, fingerprint, started_at),
         )
         self._db.commit()
@@ -118,8 +285,11 @@ class Manifest:
         """Persist the source read-consistency token (e.g. Oracle SCN) for a run so
         a resume reads the SAME snapshot the original plan captured."""
         self._db.execute(
-            "INSERT OR REPLACE INTO watermarks (run_id, table_fqn, kind, value, captured_at) "
-            "VALUES (?, '__run__', 'snapshot', ?, '')", (run_id, token or ""))
+            "INSERT INTO watermarks (run_id, table_fqn, kind, value, captured_at) "
+            "VALUES (?, '__run__', 'snapshot', ?, '') "
+            "ON CONFLICT (run_id, table_fqn) DO UPDATE SET kind=excluded.kind, "
+            "value=excluded.value, captured_at=excluded.captured_at",
+            (run_id, token or ""))
         self._db.commit()
 
     def get_snapshot(self, run_id: str) -> Optional[str]:
@@ -141,8 +311,10 @@ class Manifest:
     def add_table(self, run_id: str, table_fqn: str, target_table: str,
                   total_rows_est: int = 0) -> None:
         self._db.execute(
-            "INSERT OR REPLACE INTO tables (run_id, table_fqn, target_table, total_rows_est, status) "
-            "VALUES (?,?,?,?, 'pending')",
+            "INSERT INTO tables (run_id, table_fqn, target_table, total_rows_est, status) "
+            "VALUES (?,?,?,?, 'pending') "
+            "ON CONFLICT (run_id, table_fqn) DO UPDATE SET target_table=excluded.target_table, "
+            "total_rows_est=excluded.total_rows_est, status=excluded.status",
             (run_id, table_fqn, target_table, total_rows_est),
         )
         self._db.commit()
@@ -151,14 +323,21 @@ class Manifest:
                   predicate: Optional[str] = None, lo: Optional[str] = None,
                   hi: Optional[str] = None) -> None:
         self._db.execute(
-            "INSERT OR IGNORE INTO chunks (run_id, table_fqn, chunk_id, predicate, bounds_lo, bounds_hi) "
-            "VALUES (?,?,?,?,?,?)",
+            "INSERT INTO chunks (run_id, table_fqn, chunk_id, predicate, bounds_lo, bounds_hi) "
+            "VALUES (?,?,?,?,?,?) ON CONFLICT (run_id, table_fqn, chunk_id) DO NOTHING",
             (run_id, table_fqn, chunk_id, predicate, lo, hi),
         )
+        # Maintain tables.total_chunks. Count-then-set rather than a scalar
+        # subquery in the UPDATE SET: equivalent under the single manifest writer
+        # and portable (the embedded-Nano backend doesn't bind placeholders inside
+        # an UPDATE-SET subquery).
+        (n_chunks,) = self._db.execute(
+            "SELECT count(*) FROM chunks WHERE run_id=? AND table_fqn=?",
+            (run_id, table_fqn),
+        ).fetchone()
         self._db.execute(
-            "UPDATE tables SET total_chunks = (SELECT count(*) FROM chunks "
-            "WHERE run_id=? AND table_fqn=?) WHERE run_id=? AND table_fqn=?",
-            (run_id, table_fqn, run_id, table_fqn),
+            "UPDATE tables SET total_chunks=? WHERE run_id=? AND table_fqn=?",
+            (n_chunks, run_id, table_fqn),
         )
         self._db.commit()
 
@@ -214,8 +393,9 @@ class Manifest:
     def set_watermark(self, run_id: str, table_fqn: str, kind: str, value: str,
                       captured_at: str = "") -> None:
         self._db.execute(
-            "INSERT OR REPLACE INTO watermarks (run_id, table_fqn, kind, value, captured_at) "
-            "VALUES (?,?,?,?,?)",
+            "INSERT INTO watermarks (run_id, table_fqn, kind, value, captured_at) "
+            "VALUES (?,?,?,?,?) ON CONFLICT (run_id, table_fqn) DO UPDATE SET "
+            "kind=excluded.kind, value=excluded.value, captured_at=excluded.captured_at",
             (run_id, table_fqn, kind, value, captured_at),
         )
         self._db.commit()

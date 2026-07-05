@@ -56,7 +56,9 @@ def _run_context(cfg):  # type: ignore[no-untyped-def]
         cfg.source.host, cfg.source.port, cfg.source.schema or "",
         cfg.target.host, cfg.target.port, cfg.target.dbname)
     run_id = "run_" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:10]
-    return os.path.join(cfg.options.output_dir, "manifest.db"), run_id
+    from .core.manifest import manifest_path_for
+    backend = getattr(cfg.options, "manifest_backend", "sqlite")
+    return manifest_path_for(cfg.options.output_dir, backend), run_id
 
 
 def _print_validation(res) -> None:  # type: ignore[no-untyped-def]
@@ -152,7 +154,7 @@ def export(
     from .config.store import (
         build_source_adapter, build_target_driver, build_type_registry, load_config)
     from .core.catalog_model import DataTypeKind
-    from .core.orchestrator import _portable_view
+    from .core.orchestrator import _order_views, _portable_view
     from .emit import ddl
 
     cfg = load_config(config)
@@ -185,7 +187,9 @@ def export(
             view_dialect, view_caps = "postgres", None
         bool_cols = {c.name for t in schema.tables for c in t.columns
                      if c.data_type.kind is DataTypeKind.BOOLEAN}
-        for v in schema.views:
+        # Dependency order so a view referencing another view is written after it
+        # (PG and HeliosDB require the referent to exist at CREATE time).
+        for v in _order_views(schema.views):
             pv, _notes = _portable_view(v, view_dialect, view_caps, bool_cols)
             parts.append(ddl.render_view(pv, pc))
         for t in schema.tables:
@@ -415,7 +419,7 @@ def status(config: str = CONFIG_OPT) -> None:
     manifest_path, run_id = _run_context(cfg)
     if not os.path.exists(manifest_path):
         _fail("no manifest at {} (run `a2h migrate` first)".format(manifest_path))
-    man = Manifest(manifest_path)
+    man = Manifest.open_readonly(manifest_path)
     try:
         summary = man.summary(run_id)
         console.print("run {}  states={}  rows_loaded={}".format(
