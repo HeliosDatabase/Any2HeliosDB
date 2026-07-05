@@ -88,6 +88,7 @@ def load_config(path: str) -> ProjectConfig:
         prefer_copy=bool(opt.get("prefer_copy", True)),
         preserve_case=bool(opt.get("preserve_case", False)),
         drop_existing=bool(opt.get("drop_existing", True)),
+        manifest_backend=str(opt.get("manifest_backend", "sqlite")).lower(),
     )
     return ProjectConfig(
         source=source, target=target, options=options,

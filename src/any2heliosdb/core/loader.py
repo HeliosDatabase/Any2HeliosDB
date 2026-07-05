@@ -42,6 +42,9 @@ class ResumableLoader:
         self.cfg = cfg
         self.schema = schema
         self.manifest_path = manifest_path
+        # Resumable-load ledger backend ("sqlite" default, or embedded "nano").
+        self.manifest_backend = getattr(
+            getattr(cfg, "options", None), "manifest_backend", "sqlite")
         self.run_id = run_id
         self.parallelism = max(1, int(parallelism))
         self.use_copy = use_copy
@@ -63,7 +66,7 @@ class ResumableLoader:
 
         probe = build_source_adapter(self.cfg)
         probe.connect()
-        man = Manifest(self.manifest_path)
+        man = Manifest(self.manifest_path, backend=self.manifest_backend)
         try:
             cfg_hash = self._config_hash()
             prior_hash, _ = man.get_run(self.run_id)
@@ -150,7 +153,7 @@ class ResumableLoader:
 
         stats = LoadStats()
         stats.warnings = list(self._notes)
-        man = Manifest(self.manifest_path)
+        man = Manifest(self.manifest_path, backend=self.manifest_backend)
         try:
             stats.rows = man.rows_by_table(self.run_id)
             counts = man.summary(self.run_id)["chunk_states"]
@@ -166,7 +169,7 @@ class ResumableLoader:
         return stats
 
     def _load_pending(self, parallel: bool) -> None:
-        man = Manifest(self.manifest_path)
+        man = Manifest(self.manifest_path, backend=self.manifest_backend)
         try:
             man.recover(self.run_id)  # in_progress (crash) -> pending
             pending = man.pending_chunks(self.run_id)  # pending + failed
@@ -196,7 +199,7 @@ class ResumableLoader:
         table = self._table_by_fqn[table_fqn]
         src = build_source_adapter(self.cfg)
         tgt = build_target_driver(self.cfg)
-        man = Manifest(self.manifest_path)
+        man = Manifest(self.manifest_path, backend=self.manifest_backend)
         try:
             src.connect()
             # Read this chunk at the run's pinned snapshot (Oracle AS OF SCN), so
