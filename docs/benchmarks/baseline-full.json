@@ -1,0 +1,19 @@
+{
+  "label": "baseline-full-2026-07-09",
+  "reps": 3,
+  "rows": 80,
+  "selects": 6000,
+  "updates": 0,
+  "phases": {
+    "insert_bulk": {
+      "ops_per_sec": 19.0,
+      "p50_ms": 0.0,
+      "p95_ms": 0.0
+    },
+    "select": {
+      "ops_per_sec": 6171.9,
+      "p50_ms": 0.158,
+      "p95_ms": 0.184
+    }
+  }
+}
