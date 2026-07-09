@@ -26,25 +26,25 @@ from .trail import Trail
 _NANO_MIN_CDC_VERSION = (3, 58, 5)
 
 
-def _version_tuple(version: str):  # type: ignore[no-untyped-def]
+def _version_tuple(version: str):
     """First X.Y.Z in a HeliosDB version banner as an int tuple, else None."""
     m = re.search(r"(\d+)\.(\d+)\.(\d+)", version or "")
     return tuple(int(g) for g in m.groups()) if m else None
 
 
-def _registry_path(cfg) -> str:  # type: ignore[no-untyped-def]
+def _registry_path(cfg) -> str:
     return os.path.join(cfg.options.output_dir, "cdc.db")
 
 
-def _trail_dir(cfg, name: str) -> str:  # type: ignore[no-untyped-def]
+def _trail_dir(cfg, name: str) -> str:
     return os.path.join(cfg.options.output_dir, "trail", name)
 
 
-def _binlog_pos_file(cfg, name: str) -> str:  # type: ignore[no-untyped-def]
+def _binlog_pos_file(cfg, name: str) -> str:
     return os.path.join(_trail_dir(cfg, name), "binlog.pos")
 
 
-def run_extract(cfg, name: str) -> Dict[str, object]:  # type: ignore[no-untyped-def]
+def run_extract(cfg, name: str) -> Dict[str, object]:
     from ..config.store import build_source_adapter
     from ..constants import SourceDialect
 
@@ -69,8 +69,8 @@ def run_extract(cfg, name: str) -> Dict[str, object]:  # type: ignore[no-untyped
             if os.path.exists(posf):
                 with open(posf) as f:
                     since = f.read().strip()
-            source = MySqlBinlogSource(cfg.source.to_dsn(), schema_name, schema_ir.tables)
-            records, new_pos = source.capture(since)
+            mysql_source = MySqlBinlogSource(cfg.source.to_dsn(), schema_name, schema_ir.tables)
+            records, new_pos = mysql_source.capture(since)
             captured = trail.append(records)
             with open(posf, "w") as f:
                 f.write(new_pos)
@@ -85,10 +85,10 @@ def run_extract(cfg, name: str) -> Dict[str, object]:  # type: ignore[no-untyped
             # display + `a2h status`.
             from .sources.postgres_logical import PostgresLogicalSource
 
-            source = PostgresLogicalSource(adapter, schema_name, schema_ir.tables, name)
-            records, new_lsn, skipped = source.capture()
+            pg_source = PostgresLogicalSource(adapter, schema_name, schema_ir.tables, name)
+            records, new_lsn, skipped = pg_source.capture()
             captured = trail.append(records)
-            source.advance(new_lsn)
+            pg_source.advance(new_lsn)
             posf = _binlog_pos_file(cfg, name)
             os.makedirs(os.path.dirname(posf), exist_ok=True)
             with open(posf, "w") as f:
@@ -97,8 +97,8 @@ def run_extract(cfg, name: str) -> Dict[str, object]:  # type: ignore[no-untyped
                     "since": "(slot)", "skipped": skipped, "mode": "logical"}
 
         # Default: Oracle SCN-watermark capture.
-        source = OracleScnSource(adapter, schema_name, schema_ir.tables)
-        records, new_watermark, skipped = source.capture(ext.watermark)
+        oracle_source = OracleScnSource(adapter, schema_name, schema_ir.tables)
+        records, new_watermark, skipped = oracle_source.capture(ext.watermark)
         captured = trail.append(records)
         reg.set_watermark(name, new_watermark)
         return {"captured": captured, "watermark": new_watermark,
@@ -108,7 +108,7 @@ def run_extract(cfg, name: str) -> Dict[str, object]:  # type: ignore[no-untyped
         reg.close()
 
 
-def run_replicat(cfg, name: str, reconcile_deletes: bool = True) -> Dict[str, object]:  # type: ignore[no-untyped-def]
+def run_replicat(cfg, name: str, reconcile_deletes: bool = True) -> Dict[str, object]:
     from ..config.store import build_source_adapter, build_target_driver
     from ..constants import Edition
 
@@ -157,7 +157,7 @@ def run_replicat(cfg, name: str, reconcile_deletes: bool = True) -> Dict[str, ob
         reg.close()
 
 
-def list_extracts(cfg) -> List[Extract]:  # type: ignore[no-untyped-def]
+def list_extracts(cfg) -> List[Extract]:
     reg = CdcRegistry(_registry_path(cfg))
     try:
         return reg.list()

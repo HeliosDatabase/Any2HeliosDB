@@ -21,7 +21,7 @@ def oracle_ident(name: str) -> str:
     return '"{}"'.format(name.replace('"', '""'))
 
 
-def _col_type(column) -> str:  # type: ignore[no-untyped-def]
+def _col_type(column) -> str:
     # Near-passthrough: prefer the verbatim Oracle source type.
     return column.source_type or column.data_type.sql()
 

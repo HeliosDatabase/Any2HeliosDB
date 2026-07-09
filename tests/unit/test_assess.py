@@ -21,7 +21,6 @@ from any2heliosdb.constants import Edition, SourceDialect
 from any2heliosdb.core.catalog_model import (
     Column,
     DataType,
-    DataTypeKind as K,
     PrimaryKey,
     Routine,
     RoutineKind,

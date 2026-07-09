@@ -20,9 +20,7 @@ from __future__ import annotations
 import logging
 import math
 import re
-from typing import Iterator, List, Optional, Sequence, Tuple
-
-_LOG = logging.getLogger("any2heliosdb.sources.oracle")
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ...constants import SourceDialect
 from ...core.catalog_model import (
@@ -48,6 +46,8 @@ from ...core.catalog_model import (
 from ...errors import IntrospectionError, SourceConnectionError
 from ..base import SourceAdapter, SourceDsn
 from ...typemap.defaults import map_oracle_type
+
+_LOG = logging.getLogger("any2heliosdb.sources.oracle")
 
 _thick_inited = False
 
@@ -154,7 +154,7 @@ class OracleAdapter(SourceAdapter):
 
     def __init__(self, dsn: SourceDsn) -> None:
         super().__init__(dsn)
-        self._conn = None  # type: ignore[assignment]
+        self._conn: Any = None
         self._snapshot_scn: Optional[int] = None  # set via use_snapshot() for AS OF SCN reads
 
     def connect(self) -> None:
@@ -173,7 +173,7 @@ class OracleAdapter(SourceAdapter):
             conn_dsn = oracledb.makedsn(self.dsn.host, self.dsn.port, sid=self.dsn.sid)
         else:
             conn_dsn = "{}:{}".format(self.dsn.host, self.dsn.port)
-        kw = {"user": self.dsn.user, "password": self.dsn.password, "dsn": conn_dsn}
+        kw: Dict[str, Any] = {"user": self.dsn.user, "password": self.dsn.password, "dsn": conn_dsn}
         if self.dsn.sysdba:
             kw["mode"] = oracledb.AUTH_MODE_SYSDBA  # required for the SYS user
         try:
@@ -189,7 +189,7 @@ class OracleAdapter(SourceAdapter):
                 self._conn = None
 
     @property
-    def conn(self):  # type: ignore[no-untyped-def]
+    def conn(self):
         if self._conn is None:
             raise SourceConnectionError("Oracle adapter not connected")
         return self._conn
@@ -204,7 +204,7 @@ class OracleAdapter(SourceAdapter):
             cur.execute(sql, binds)
             return cur.fetchall()
 
-    def _q1_consistent(self, build):  # type: ignore[no-untyped-def]
+    def _q1_consistent(self, build):
         """Run a single-row read that uses the snapshot, falling back to a current
         read on a flashback error. ``build(as_of_clause)`` returns the SQL given an
         ``AS OF SCN n`` (or empty) clause."""
@@ -514,7 +514,7 @@ class OracleAdapter(SourceAdapter):
         row = self._q1_consistent(lambda a: "SELECT COUNT(*) FROM {}{}".format(tbl, a))
         return int(row[0]) if row else 0
 
-    def numeric_pk_bounds(self, table: Table, pk_col: str):  # type: ignore[no-untyped-def]
+    def numeric_pk_bounds(self, table: Table, pk_col: str):
         owner = (table.schema or self.default_schema()).upper()
         tbl = quote_oracle(owner, table.name)
         row = self._q1_consistent(

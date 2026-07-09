@@ -17,7 +17,7 @@ from __future__ import annotations
 import abc
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ..constants import Edition
 
@@ -34,8 +34,8 @@ class TargetDsn:
     sslmode: Optional[str] = None  # e.g. "require"
     connect_timeout: int = 10
 
-    def conninfo_kwargs(self) -> Dict[str, object]:
-        kw: Dict[str, object] = {
+    def conninfo_kwargs(self) -> Dict[str, Any]:
+        kw: Dict[str, Any] = {
             "host": self.host,
             "port": self.port,
             "dbname": self.dbname,
@@ -209,6 +209,18 @@ class TargetDriver(abc.ABC):
         on_conflict_do_nothing: bool = False,
     ) -> int:
         """Batched multi-row INSERT fallback. Returns rows written."""
+
+    @abc.abstractmethod
+    def load_range(
+        self,
+        target_table: str,
+        columns: Sequence[str],
+        rows: Iterable[Sequence[object]],
+        where: Optional[str] = None,
+        use_copy: bool = True,
+    ) -> int:
+        """Idempotently (re)load one chunk: DELETE its range then load, in a
+        single transaction. Returns rows written."""
 
     # --- CDC apply seam (idempotent) ------------------------------------
     @abc.abstractmethod

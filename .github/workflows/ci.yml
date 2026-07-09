@@ -1,0 +1,45 @@
+name: CI
+
+# Lint + type + test gate for every push to main and every pull request.
+# Hermetic: the full pytest suite runs, and the integration tests self-skip
+# without live servers (no A2H_TEST_* env vars are set here), so no database
+# services are needed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package + dev tooling
+        # Extras installed: oracle, mysql, mysql-cdc, mcp, dev.
+        #   * mssql is OMITTED: pyodbc needs unixODBC system libraries that aren't
+        #     present on a bare runner; its imports are covered by the
+        #     [[tool.mypy.overrides]] ignore_missing_imports block instead.
+        #   * nano-manifest is OMITTED: heliosdb-nano-embedded is not published on
+        #     PyPI, so it can't be pip-installed here (also covered by the mypy
+        #     overrides). Re-add it once the wheel is on PyPI (backlog).
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[oracle,mysql,mysql-cdc,mcp,dev]"
+      - name: Test (full hermetic suite; integration self-skips)
+        run: python -m pytest -q
+      - name: Lint (ruff)
+        run: ruff check src tests tools
+      - name: Type-check (mypy)
+        run: mypy src/any2heliosdb

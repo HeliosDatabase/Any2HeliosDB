@@ -54,7 +54,7 @@ def _dedup_index_name(name: str, table_name: str, seen: set) -> str:
     return cand
 
 
-def _translate_bool_comparisons(sql: str, bool_cols) -> str:  # type: ignore[no-untyped-def]
+def _translate_bool_comparisons(sql: str, bool_cols) -> str:
     """Rewrite ``<boolcol> = 1`` / ``= 0`` (and ``'1'``/``'0'``) to ``= true`` /
     ``= false`` for the named BOOLEAN columns.
 
@@ -71,7 +71,7 @@ def _translate_bool_comparisons(sql: str, bool_cols) -> str:  # type: ignore[no-
     return out
 
 
-def _portable_view(view, dialect, capabilities, bool_cols=()):  # type: ignore[no-untyped-def]
+def _portable_view(view, dialect, capabilities, bool_cols=()):
     """Make a source view's body portable for the target; return (view, notes).
 
     On the PG-wire path (``dialect`` is neither oracle nor mysql) the source-
@@ -92,7 +92,7 @@ def _portable_view(view, dialect, capabilities, bool_cols=()):  # type: ignore[n
     return view, notes
 
 
-def _order_views(views):  # type: ignore[no-untyped-def]
+def _order_views(views):
     """Order views so each is emitted AFTER every other view it references.
 
     Both PostgreSQL and HeliosDB require a view's referents to exist at CREATE
@@ -198,49 +198,49 @@ def migrate(
 
     # Per-dialect DDL emitters (closures so the per-statement loops stay readable).
     if is_oracle:
-        def render_table(t):  # type: ignore[no-untyped-def]
+        def render_table(t):
             return oracle_ddl.render_create_table_oracle(t)
 
-        def render_seq(seq):  # type: ignore[no-untyped-def]
+        def render_seq(seq):
             return oracle_ddl.render_sequence_oracle(seq)
 
-        def render_idx(t, idx):  # type: ignore[no-untyped-def]
+        def render_idx(t, idx):
             return oracle_ddl.render_index_oracle(t, idx)
 
-        def render_fks(t):  # type: ignore[no-untyped-def]
+        def render_fks(t):
             return oracle_ddl.render_foreign_keys_oracle(t)
 
-        def render_drop_fks(t):  # type: ignore[no-untyped-def]
+        def render_drop_fks(t):
             return []  # native Oracle path doesn't run the chunked loader
     elif is_mysql:
-        def render_table(t):  # type: ignore[no-untyped-def]
+        def render_table(t):
             return mysql_ddl.render_create_table(t, registry, preserve_case)
 
-        def render_seq(seq):  # type: ignore[no-untyped-def]
+        def render_seq(seq):
             return None  # MySQL has no CREATE SEQUENCE (use AUTO_INCREMENT)
 
-        def render_idx(t, idx):  # type: ignore[no-untyped-def]
+        def render_idx(t, idx):
             return mysql_ddl.render_index(t, idx, preserve_case)
 
-        def render_fks(t):  # type: ignore[no-untyped-def]
+        def render_fks(t):
             return mysql_ddl.render_foreign_keys(t, preserve_case)
 
-        def render_drop_fks(t):  # type: ignore[no-untyped-def]
+        def render_drop_fks(t):
             return mysql_ddl.render_drop_foreign_keys(t, preserve_case)
     else:
-        def render_table(t):  # type: ignore[no-untyped-def]
+        def render_table(t):
             return render_create_table(t, registry, preserve_case)
 
-        def render_seq(seq):  # type: ignore[no-untyped-def]
+        def render_seq(seq):
             return render_sequence(seq, preserve_case)
 
-        def render_idx(t, idx):  # type: ignore[no-untyped-def]
+        def render_idx(t, idx):
             return render_index(t, idx, preserve_case)
 
-        def render_fks(t):  # type: ignore[no-untyped-def]
+        def render_fks(t):
             return render_foreign_keys(t, preserve_case)
 
-        def render_drop_fks(t):  # type: ignore[no-untyped-def]
+        def render_drop_fks(t):
             return render_drop_foreign_keys(t, preserve_case)
 
     def qtable(name: str) -> str:

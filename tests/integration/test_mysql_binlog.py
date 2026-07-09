@@ -68,7 +68,8 @@ def test_mysql_binlog_cdc(tmp_path):
     cfg = _cfg(tmp_path)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     try:
         migrate(src, tgt, schema="hr", registry=build_type_registry(cfg))
         run_extract(cfg, "b1")  # anchor the binlog position (+ set FULL metadata)
@@ -92,4 +93,5 @@ def test_mysql_binlog_cdc(tmp_path):
         assert float(tgt.query("SELECT salary FROM employees WHERE emp_id=1")[0][0]) == 999999
         assert tgt.query("SELECT count(*) FROM employees WHERE emp_id=5")[0][0] == 0
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()

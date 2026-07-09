@@ -159,7 +159,8 @@ def test_oracle_to_mysql_migrate_and_validate():
     cfg = _oracle_to_mysql_cfg("hr_fwd")
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     try:
         stats = migrate(src, tgt, schema="HR", registry=build_type_registry(cfg))
         assert stats.tables == 2
@@ -173,7 +174,8 @@ def test_oracle_to_mysql_migrate_and_validate():
             res = run_test_data(src, tgt, t, sample_rows=0)
             assert res.passed, "TEST_DATA failed for {}: {}".format(t.name, res.errors)
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
     # Independent assertion straight from MySQL.
     assert _mysql_count("hr_fwd", "departments") == 3
@@ -204,19 +206,24 @@ def test_helios_to_mysql_migrate_back():
 
     # Step 1: Oracle -> HeliosDB (psycopg).
     o2h = _oracle_to_helios_cfg()
-    s = build_source_adapter(o2h); t = build_target_driver(o2h)
-    s.connect(); t.connect()
+    s = build_source_adapter(o2h)
+    t = build_target_driver(o2h)
+    s.connect()
+    t.connect()
     try:
         st = migrate(s, t, schema="HR", registry=build_type_registry(o2h))
         assert st.total_rows == 8
     finally:
-        s.close(); t.close()
+        s.close()
+        t.close()
 
     # Step 2: HeliosDB (postgres source) -> MySQL.
     _recreate_mysql_db("hr_back")
     h2m = _helios_to_mysql_cfg("hr_back")
-    src = build_source_adapter(h2m); tgt = build_target_driver(h2m)
-    src.connect(); tgt.connect()
+    src = build_source_adapter(h2m)
+    tgt = build_target_driver(h2m)
+    src.connect()
+    tgt.connect()
     try:
         assert getattr(tgt, "dialect", None) == "mysql"
         stats = migrate(src, tgt, schema="public", registry=build_type_registry(h2m))
@@ -227,7 +234,8 @@ def test_helios_to_mysql_migrate_back():
         assert run_test(schema, tgt).passed, "TEST (structure) failed"
         assert run_test_count(src, tgt, schema.tables).passed, "TEST_COUNT failed"
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
     # Independent assertion: data is back out of HeliosDB and in MySQL.
     assert _mysql_count("hr_back", "departments") == 3

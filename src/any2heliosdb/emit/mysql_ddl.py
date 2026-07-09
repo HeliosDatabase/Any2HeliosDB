@@ -102,7 +102,7 @@ def mysql_type(dt: DataType) -> str:
     return "LONGTEXT"
 
 
-def _col_type(table: Table, column, registry: Optional[TypeRegistry]) -> str:  # type: ignore[no-untyped-def]
+def _col_type(table: Table, column, registry: Optional[TypeRegistry]) -> str:
     if registry is not None and column.source_type:
         resolved = registry.resolve(
             column.source_type, table=table.name, column=column.name, schema=table.schema

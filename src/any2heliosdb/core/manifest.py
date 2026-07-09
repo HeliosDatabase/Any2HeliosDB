@@ -24,7 +24,7 @@ import os
 import sqlite3
 import threading
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 SQLITE = "sqlite"
 NANO = "nano"
@@ -65,10 +65,10 @@ class _NanoCursor:
         self._rows = rows
         self.rowcount = rowcount
 
-    def fetchone(self):  # type: ignore[no-untyped-def]
+    def fetchone(self):
         return self._rows[0] if self._rows else None
 
-    def fetchall(self):  # type: ignore[no-untyped-def]
+    def fetchall(self):
         return list(self._rows)
 
 
@@ -84,7 +84,7 @@ _NANO_WRITERS_LOCK = threading.Lock()
 
 
 class _NanoShared:
-    def __init__(self, db) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, db) -> None:
         self.db = db
         self.lock = threading.RLock()
         self.refs = 0
@@ -138,7 +138,7 @@ class _NanoConn:
             self._lock = self._shared.lock
             self._db = self._shared.db
 
-    def execute(self, sql: str, params: tuple = ()):  # type: ignore[no-untyped-def]
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> _NanoCursor:
         nsql = _qmark_to_dollar(sql)
         p = list(params)
         with self._lock:
@@ -225,7 +225,7 @@ class Manifest:
             # read-only open) takes no lock, so the live monitor can read while
             # the loader holds the writer open. commit() flushes so a fresh
             # read-only open sees the latest committed rows.
-            self._db = _NanoConn(path, readonly=readonly)
+            self._db: Union[_NanoConn, sqlite3.Connection] = _NanoConn(path, readonly=readonly)
             if not readonly:
                 self._db.executescript(_SCHEMA)
                 self._db.commit()
@@ -271,7 +271,7 @@ class Manifest:
         )
         self._db.commit()
 
-    def get_run(self, run_id: str):  # type: ignore[no-untyped-def]
+    def get_run(self, run_id: str):
         """``(config_hash, source_fingerprint)`` for a prior run, else ``(None, None)``.
 
         Lets the loader detect config/source drift before trusting LOADED chunks
@@ -400,7 +400,7 @@ class Manifest:
         )
         self._db.commit()
 
-    def get_watermark(self, run_id: str, table_fqn: str):  # type: ignore[no-untyped-def]
+    def get_watermark(self, run_id: str, table_fqn: str):
         return self._db.execute(
             "SELECT kind, value FROM watermarks WHERE run_id=? AND table_fqn=?",
             (run_id, table_fqn),
