@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
-from typing import Optional
+from typing import NoReturn, Optional, cast
 
 import typer
 from rich.console import Console
@@ -44,12 +44,12 @@ def _main(
     """Any2HeliosDB — a2h."""
 
 
-def _fail(msg: str) -> None:
+def _fail(msg: str) -> NoReturn:
     console.print("[red]error:[/red] {}".format(msg))
     raise typer.Exit(code=1)
 
 
-def _run_context(cfg):  # type: ignore[no-untyped-def]
+def _run_context(cfg):
     """Deterministic (manifest_path, run_id) for a config, so `resume`/`status`
     find the same ledger as the `migrate` that created it."""
     key = "{}:{}/{}->{}:{}/{}".format(
@@ -61,7 +61,7 @@ def _run_context(cfg):  # type: ignore[no-untyped-def]
     return manifest_path_for(cfg.options.output_dir, backend), run_id
 
 
-def _print_validation(res) -> None:  # type: ignore[no-untyped-def]
+def _print_validation(res) -> None:
     color = "green" if res.passed else "red"
     console.print("[{}]{}: {}[/]".format(color, res.validation_type.value,
                                          "PASS" if res.passed else "FAIL"))
@@ -76,7 +76,9 @@ def _print_validation(res) -> None:  # type: ignore[no-untyped-def]
 def doctor() -> None:
     """Check the local environment: core deps and which source-DB drivers are available."""
     table = RichTable(title="Any2HeliosDB environment")
-    table.add_column("Component"); table.add_column("Status"); table.add_column("Detail")
+    table.add_column("Component")
+    table.add_column("Status")
+    table.add_column("Detail")
 
     def check(mod: str, label: str, role: str) -> None:
         if importlib.util.find_spec(mod) is not None:
@@ -225,7 +227,8 @@ def migrate(config: str = CONFIG_OPT) -> None:
     cfg = load_config(config)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     try:
         manifest_path, run_id = _run_context(cfg)
         stats = run_migrate(
@@ -247,7 +250,8 @@ def migrate(config: str = CONFIG_OPT) -> None:
                           "INCOMPLETE. Run `a2h status` then `a2h resume`.".format(stats.failed_chunks))
             raise typer.Exit(code=1)
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
 @app.command()
@@ -264,17 +268,20 @@ def test_(config: str = CONFIG_OPT) -> None:
     from .validate.structure import run_test
 
     cfg = load_config(config)
-    src = build_source_adapter(cfg); tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src = build_source_adapter(cfg)
+    tgt = build_target_driver(cfg)
+    src.connect()
+    tgt.connect()
     try:
         res = run_test(src.introspect_schema(cfg.source.schema), tgt, cfg.options.preserve_case)
         _print_validation(res)
         raise typer.Exit(0 if res.passed else 1)
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
-def _effective_preserve_case(cfg, tgt) -> bool:  # type: ignore[no-untyped-def]
+def _effective_preserve_case(cfg, tgt) -> bool:
     """Validators must render identifiers the way the migration created them. The
     native (Oracle-wire) target keeps source-case names (the orchestrator uses
     ``keep_source_case = preserve_case or oracle-dialect``), so a validator that
@@ -292,15 +299,18 @@ def test_count(config: str = CONFIG_OPT) -> None:
     from .validate.counts import run_test_count
 
     cfg = load_config(config)
-    src = build_source_adapter(cfg); tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src = build_source_adapter(cfg)
+    tgt = build_target_driver(cfg)
+    src.connect()
+    tgt.connect()
     try:
         schema = src.introspect_schema(cfg.source.schema)
         res = run_test_count(src, tgt, schema.tables, _effective_preserve_case(cfg, tgt))
         _print_validation(res)
         raise typer.Exit(0 if res.passed else 1)
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
 @app.command(name="test-data")
@@ -313,8 +323,10 @@ def test_data(
     from .validate.data import run_test_data
 
     cfg = load_config(config)
-    src = build_source_adapter(cfg); tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src = build_source_adapter(cfg)
+    tgt = build_target_driver(cfg)
+    src.connect()
+    tgt.connect()
     failed = False
     try:
         for t in src.introspect_schema(cfg.source.schema).tables:
@@ -324,7 +336,8 @@ def test_data(
             failed = failed or not res.passed
         raise typer.Exit(1 if failed else 0)
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
 @app.command()
@@ -334,8 +347,10 @@ def test_index(config: str = CONFIG_OPT) -> None:
     from .validate.data import run_test_index
 
     cfg = load_config(config)
-    src = build_source_adapter(cfg); tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src = build_source_adapter(cfg)
+    tgt = build_target_driver(cfg)
+    src.connect()
+    tgt.connect()
     failed = False
     try:
         # The source schema supplies the FK metadata; the probe runs on the target.
@@ -345,7 +360,8 @@ def test_index(config: str = CONFIG_OPT) -> None:
             failed = failed or not res.passed
         raise typer.Exit(1 if failed else 0)
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
 @app.command()
@@ -372,7 +388,7 @@ def extract(name: str = typer.Argument(..., help="Extract (capture process) name
         label = "incremental since SCN {}".format(r["since"])
     console.print("[green]extract {}[/green]: captured {} change(s) ({}); watermark={}".format(
         name, r["captured"], label, r["watermark"]))
-    for s in r["skipped"]:
+    for s in cast("list", r["skipped"]):
         console.print("  [yellow]skipped {} (no primary key)[/yellow]".format(s))
 
 
@@ -390,7 +406,7 @@ def replicat(name: str = typer.Argument(..., help="Replicat (apply process) name
     r = run_replicat(cfg, name, reconcile_deletes=reconcile_deletes)
     console.print("[green]replicat {}[/green]: applied {} change(s), deleted {}, from {} read; cursor={}".format(
         name, r["applied"], r["deleted"], r["read"], r["cursor"]))
-    for w in r["warnings"]:
+    for w in cast("list", r["warnings"]):
         console.print("  [yellow]warn:[/yellow] {}".format(w))
 
 
@@ -468,6 +484,11 @@ def monitor(
 
         cfg = load_config(config)
         manifest_path, run_id = _run_context(cfg)
+    # Both are always resolved above (the flag branch requires both; the derive
+    # branch always yields both) — guard so a None can never reach run_monitor.
+    if not manifest_path or not run_id:
+        _fail("could not resolve manifest path and run id (pass --manifest and "
+              "--run-id, or -c to derive both)")
     if not os.path.exists(manifest_path):
         _fail("no manifest at {} (run `a2h migrate` first)".format(manifest_path))
     code = run_monitor(manifest_path, run_id, interval=interval, once=once, console=console)
@@ -487,7 +508,8 @@ def resume(config: str = CONFIG_OPT) -> None:
         _fail("no manifest to resume at {} (run `a2h migrate` first)".format(manifest_path))
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     try:
         stats = run_migrate(
             src, tgt, schema=cfg.source.schema, registry=build_type_registry(cfg),
@@ -507,7 +529,8 @@ def resume(config: str = CONFIG_OPT) -> None:
                           "once the cause is fixed.".format(stats.failed_chunks))
             raise typer.Exit(code=1)
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
 # --- MCP server (AI-agent remote administration) -----------------------------

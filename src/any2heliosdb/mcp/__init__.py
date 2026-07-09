@@ -37,7 +37,7 @@ __all__ = [
 ]
 
 
-def serve(*args, **kwargs):  # type: ignore[no-untyped-def]
+def serve(*args, **kwargs):
     """Lazy wrapper around :func:`any2heliosdb.mcp.server.serve` (keeps the
     package import light; the server module imports ``http.server`` etc.)."""
     from .server import serve as _serve

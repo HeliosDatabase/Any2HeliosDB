@@ -72,7 +72,7 @@ class SourceAdapter(abc.ABC):
     @abc.abstractmethod
     def exact_row_count(self, table: Table) -> int: ...
 
-    def numeric_pk_bounds(self, table: Table, pk_col: str):  # type: ignore[no-untyped-def]
+    def numeric_pk_bounds(self, table: Table, pk_col: str):
         """``(min, max)`` of an integer PK column, or ``None`` if the column is
         non-integer or the table is empty. Used to split a table into key-range
         chunks for parallel/resumable load. The default returns ``None`` (no

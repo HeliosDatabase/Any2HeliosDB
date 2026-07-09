@@ -43,7 +43,7 @@ def _runs_by_op_class(recs: List[ChangeRecord]) -> Iterator[Tuple[bool, List[Cha
 
 
 class Replicat:
-    def __init__(self, target, schema_ir, preserve_case: bool = False) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, target, schema_ir, preserve_case: bool = False) -> None:
         self.target = target
         self.preserve_case = preserve_case
         self._by_name = {t.name.upper(): t for t in schema_ir.tables}
@@ -82,7 +82,7 @@ class Replicat:
                     applied += self.target.upsert(target_table, key_cols, tcols, rows)
         return applied, warnings
 
-    def reconcile_deletes(self, source_adapter) -> Tuple[int, List[str]]:  # type: ignore[no-untyped-def]
+    def reconcile_deletes(self, source_adapter) -> Tuple[int, List[str]]:
         """Delete target rows whose PK is absent from the source's current keys.
 
         v1 SCN-watermark capture cannot observe DELETEs (the rows are already

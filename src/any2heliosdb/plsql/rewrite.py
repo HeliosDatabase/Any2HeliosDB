@@ -399,8 +399,13 @@ def _keep_group_by_nonaggregates(sql: str) -> Tuple[str, bool]:
     frm = _find_top_level_kw(sql, _RE_FROM)
     if sel < 0 or frm < 0 or not (sel < frm < gb):
         return sql, False
-    select_list = sql[_RE_SELECT.match(sql, sel).end():frm]
-    gb_kw_end = _RE_GROUP_BY.match(sql, gb).end()
+    # sel/gb are positions where these exact patterns already matched (via
+    # _find_top_level_kw), so re-matching at them can never be None.
+    sel_m = _RE_SELECT.match(sql, sel)
+    gb_m = _RE_GROUP_BY.match(sql, gb)
+    assert sel_m is not None and gb_m is not None
+    select_list = sql[sel_m.end():frm]
+    gb_kw_end = gb_m.end()
     rest = sql[gb_kw_end:]
     cut = len(rest)
     kw_at = _find_top_level_kw(rest, _RE_GB_END)

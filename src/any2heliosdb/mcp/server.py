@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .auth import AuthError, Principal, Role, TokenAuthenticator
 from .protocol import INTERNAL_ERROR, PARSE_ERROR, Dispatcher, _error
@@ -47,7 +47,7 @@ def _make_http_handler(dispatcher: Dispatcher, auth: TokenAuthenticator):
         def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
             return
 
-        def _send_json(self, code: int, payload: Dict[str, Any]) -> None:
+        def _send_json(self, code: int, payload: Union[Dict[str, Any], List[Any]]) -> None:
             body = json.dumps(payload).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
@@ -191,7 +191,7 @@ def serve(transport: str = "http", host: str = "127.0.0.1", port: int = 8080,
     """
     registry = registry or build_catalog()
     auth = TokenAuthenticator.from_env(tokens, tokens_file)
-    info = {
+    info: Dict[str, Any] = {
         "transport": transport,
         "sdk_path": "fastmcp" if sdk_available() else "builtin-jsonrpc",
         "tools": registry.names(),

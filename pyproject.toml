@@ -71,8 +71,39 @@ packages = ["src/any2heliosdb"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
 
 [tool.ruff]
 line-length = 100
 target-version = "py39"
+
+[tool.mypy]
+# Reproducible gate: `mypy src/any2heliosdb`. Pin the interpreter so the check is
+# identical across the CI matrix (3.9/3.11/3.13), and flag stale suppressions so
+# a `# type: ignore` can never silently rot.
+python_version = "3.9"
+warn_unused_ignores = true
+
+# Optional source/target DB drivers and the embedded-Nano manifest wheel ship no
+# type stubs or py.typed marker; jinja2 (a core dep) ships without one in some
+# environments. These are genuinely-untyped third-party boundaries — silence the
+# missing-import noise here rather than sprinkling per-line ignores. Re-add proper
+# stubs if/when upstream publishes them (e.g. types-PyMySQL for pymysql).
+[[tool.mypy.overrides]]
+module = [
+    # tomli is only installed (and only imported) on <3.11, but python_version=3.9
+    # makes mypy analyze that branch on every interpreter — including the CI
+    # 3.11/3.13 legs where pip (env marker) never installs it.
+    "tomli",
+    "oracledb",
+    "oracledb.*",
+    "pymysql",
+    "pymysql.*",
+    "pymysqlreplication",
+    "pymysqlreplication.*",
+    "pyodbc",
+    "heliosdb_nano",
+    "heliosdb_nano.*",
+    "jinja2",
+    "jinja2.*",
+]
+ignore_missing_imports = true

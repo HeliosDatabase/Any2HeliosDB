@@ -16,7 +16,7 @@ needs for HeliosDB-Lite).
 """
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 from ..errors import TargetConnectionError
 from .base import CapabilityMatrix, TargetDriver, TargetDsn, detect_edition
@@ -39,7 +39,7 @@ class MySQLTargetDriver(TargetDriver):
 
     def __init__(self, dsn: TargetDsn) -> None:
         super().__init__(dsn)
-        self._conn = None  # type: ignore[assignment]
+        self._conn: Any = None
 
     # --- lifecycle -------------------------------------------------------
     def connect(self) -> None:
@@ -64,7 +64,7 @@ class MySQLTargetDriver(TargetDriver):
                 self._conn = None
 
     @property
-    def conn(self):  # type: ignore[no-untyped-def]
+    def conn(self):
         if self._conn is None:
             raise TargetConnectionError("driver is not connected; call connect() first")
         return self._conn

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import datetime as _dt
 from decimal import Decimal
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 from ..core.identifiers import quote_ident, quote_table  # noqa: F401  (re-export)
 from ..errors import TargetConnectionError
@@ -43,7 +43,7 @@ class PsycopgDriver(TargetDriver):
 
     def __init__(self, dsn: TargetDsn) -> None:
         super().__init__(dsn)
-        self._conn = None  # type: ignore[assignment]
+        self._conn: Any = None
 
     # --- lifecycle -------------------------------------------------------
     def connect(self) -> None:
@@ -72,7 +72,7 @@ class PsycopgDriver(TargetDriver):
                 self._conn = None
 
     @property
-    def conn(self):  # type: ignore[no-untyped-def]
+    def conn(self):
         if self._conn is None:
             raise TargetConnectionError("driver is not connected; call connect() first")
         return self._conn
@@ -109,7 +109,7 @@ class PsycopgDriver(TargetDriver):
             return list(cur.fetchall())
 
     @staticmethod
-    def _exec_each(cur, stmt: str, param_sets) -> int:  # type: ignore[no-untyped-def]
+    def _exec_each(cur, stmt: str, param_sets) -> int:
         """Run ``stmt`` once per parameter set with single ``execute`` calls.
 
         psycopg's ``executemany`` runs in pipeline mode, which some HeliosDB
@@ -250,6 +250,7 @@ class PsycopgDriver(TargetDriver):
         col_list = sql.SQL(", ").join(sql.Identifier(c) for c in columns)
         conflict = sql.SQL(", ").join(sql.Identifier(c) for c in key_cols)
         non_key = [c for c in columns if c not in key_set]
+        action: sql.Composable
         if non_key:
             sets = sql.SQL(", ").join(
                 sql.SQL("{0} = EXCLUDED.{0}").format(sql.Identifier(c)) for c in non_key)
