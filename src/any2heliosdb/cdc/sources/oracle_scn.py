@@ -17,7 +17,7 @@ from ...core.change_record import UPDATE, ChangeRecord
 
 
 class OracleScnSource:
-    def __init__(self, adapter, schema, tables) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, adapter, schema, tables) -> None:
         self.adapter = adapter
         self.schema = schema
         self.tables = tables

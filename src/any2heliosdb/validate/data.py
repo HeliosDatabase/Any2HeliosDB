@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 from decimal import Decimal, InvalidOperation
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 from ..constants import Severity
 from ..core.catalog_model import Table
@@ -32,7 +32,7 @@ _NULL_SENTINEL = "\x00\\N\x00"
 _FIELD_SEP = "\x01"
 
 
-def _pg_array_literal(seq: object) -> str:
+def _pg_array_literal(seq: Sequence[object]) -> str:
     """Serialize a Python list/tuple to the PostgreSQL array literal text form.
 
     A PG ``text[]`` column (which a2h maps to TEXT on the target) is loaded by
@@ -43,7 +43,7 @@ def _pg_array_literal(seq: object) -> str:
     (with ``"`` and ``\\`` backslash-escaped); NULL elements render bare as NULL.
     """
     parts = []
-    for el in seq:  # type: ignore[union-attr]
+    for el in seq:
         if el is None:
             parts.append("NULL")
         elif isinstance(el, (list, tuple)):
@@ -99,9 +99,9 @@ def _render(v: object) -> str:
         return "\x00BIN\x00" + b.hex()
     if isinstance(v, str) and len(v) >= 2 and v[0] == "\\" and v[1] == "x" and len(v) % 2 == 0:
         # Same quirk, but the target typed it as text so psycopg returns a str.
-        body = v[2:]
-        if body and all(c in "0123456789abcdefABCDEF" for c in body):
-            return "\x00BIN\x00" + body.lower()
+        hexbody = v[2:]
+        if hexbody and all(c in "0123456789abcdefABCDEF" for c in hexbody):
+            return "\x00BIN\x00" + hexbody.lower()
     if isinstance(v, _dt.datetime):
         # A timestamptz round-trips tz-aware from one side (source PostgreSQL hands
         # it back in the session tz) and naive from another (HeliosDB returns

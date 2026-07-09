@@ -10,7 +10,7 @@ re-resolve with user overrides.
 from __future__ import annotations
 
 import re
-from typing import Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Iterator, List, Optional, Sequence, Tuple
 
 from ...constants import SourceDialect
 from ...core.catalog_model import (
@@ -62,7 +62,7 @@ class MySQLAdapter(SourceAdapter):
 
     def __init__(self, dsn: SourceDsn) -> None:
         super().__init__(dsn)
-        self._conn = None  # type: ignore[assignment]
+        self._conn: Any = None
 
     # --- lifecycle -------------------------------------------------------
     def _db(self) -> str:
@@ -91,7 +91,7 @@ class MySQLAdapter(SourceAdapter):
                 self._conn = None
 
     @property
-    def conn(self):  # type: ignore[no-untyped-def]
+    def conn(self):
         if self._conn is None:
             raise SourceConnectionError("adapter is not connected; call connect() first")
         return self._conn
@@ -205,7 +205,7 @@ class MySQLAdapter(SourceAdapter):
         row = self._q1("SELECT COUNT(*) FROM {}".format(quote_mysql(db, table.name)))
         return int(row[0]) if row else 0
 
-    def numeric_pk_bounds(self, table: Table, pk_col: str):  # type: ignore[no-untyped-def]
+    def numeric_pk_bounds(self, table: Table, pk_col: str):
         db = table.schema or self.default_schema()
         row = self._q1("SELECT MIN(`{0}`), MAX(`{0}`) FROM {1}".format(
             pk_col, quote_mysql(db, table.name)))

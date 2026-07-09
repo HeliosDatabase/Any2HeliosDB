@@ -23,10 +23,15 @@ htmlcov/
 *.secret
 .env
 
-# Stray HeliosDB server runtime dirs (if a target is pointed at the repo root)
-heliosdb-data/
-data/
-# CDC + resume state written under a project output dir
+# Stray HeliosDB server runtime dirs (if a target is pointed at the repo root).
+# Anchored to the repo root (leading /) so they never match the tracked
+# `src/any2heliosdb/data` subpackage — an unanchored `data/` silently stripped it
+# from built wheels/sdists.
+/heliosdb-data/
+/data/
+# CDC + resume state written under a project output dir. `trail/` stays
+# unanchored deliberately: [options].output_dir is user-configurable, so trail
+# dirs (captured CDC row data) can appear at any depth — never commit them.
 *.db
 trail/
 

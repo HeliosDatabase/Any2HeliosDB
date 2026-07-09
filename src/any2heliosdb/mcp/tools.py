@@ -61,7 +61,7 @@ class Tool:
 # / ``options`` block (+ optional ``data_type`` / ``modify_type`` / ``capability``).
 # Inline config is serialized to a throwaway TOML file and fed through the very
 # same ``load_config`` the CLI uses, so parsing/validation can't drift.
-_CONFIG_PROP = {
+_CONFIG_PROP: Dict[str, Dict[str, Any]] = {
     "config": {
         "type": "string",
         "description": "Path to a project config TOML on the server.",
@@ -74,7 +74,7 @@ _CONFIG_PROP = {
 }
 
 
-def _load_cfg(args: Dict[str, Any]):  # type: ignore[no-untyped-def]
+def _load_cfg(args: Dict[str, Any]):
     """Resolve a ProjectConfig from a ``config`` path or an inline config dict."""
     from ..config.store import load_config
 
@@ -104,7 +104,7 @@ def _load_cfg(args: Dict[str, Any]):  # type: ignore[no-untyped-def]
             pass
 
 
-def _run_context(cfg):  # type: ignore[no-untyped-def]
+def _run_context(cfg):
     """Deterministic (manifest_path, run_id) — identical to the CLI's, so the MCP
     ``status``/``resume`` tools find the same ledger a CLI ``migrate`` created."""
     import hashlib
@@ -118,7 +118,7 @@ def _run_context(cfg):  # type: ignore[no-untyped-def]
     return manifest_path_for(cfg.options.output_dir, backend), run_id
 
 
-def _validation_to_dict(res) -> Dict[str, Any]:  # type: ignore[no-untyped-def]
+def _validation_to_dict(res) -> Dict[str, Any]:
     return {
         "validation_type": res.validation_type.value,
         "passed": bool(res.passed),
@@ -130,7 +130,7 @@ def _validation_to_dict(res) -> Dict[str, Any]:  # type: ignore[no-untyped-def]
     }
 
 
-def _stats_to_dict(stats) -> Dict[str, Any]:  # type: ignore[no-untyped-def]
+def _stats_to_dict(stats) -> Dict[str, Any]:
     failed = int(stats.failed_chunks)
     return {
         "ok": failed == 0,
@@ -283,12 +283,14 @@ def _h_test(args: Dict[str, Any]) -> Dict[str, Any]:
     cfg = _load_cfg(args)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     try:
         res = run_test(src.introspect_schema(cfg.source.schema), tgt, cfg.options.preserve_case)
         return {"ok": res.passed, "result": _validation_to_dict(res)}
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
 def _h_test_count(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -298,13 +300,15 @@ def _h_test_count(args: Dict[str, Any]) -> Dict[str, Any]:
     cfg = _load_cfg(args)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     try:
         schema = src.introspect_schema(cfg.source.schema)
         res = run_test_count(src, tgt, schema.tables, cfg.options.preserve_case)
         return {"ok": res.passed, "result": _validation_to_dict(res)}
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
 def _h_test_data(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -315,7 +319,8 @@ def _h_test_data(args: Dict[str, Any]) -> Dict[str, Any]:
     sample = int(args.get("sample", 1000))
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     results = []
     passed = True
     try:
@@ -326,7 +331,8 @@ def _h_test_data(args: Dict[str, Any]) -> Dict[str, Any]:
             passed = passed and res.passed
         return {"ok": passed, "results": results}
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
 # Operator (write) ------------------------------------------------------------
@@ -344,7 +350,8 @@ def _h_migrate(args: Dict[str, Any]) -> Dict[str, Any]:
         cfg.options.drop_existing = bool(args["drop_existing"])
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     try:
         manifest_path, run_id = _run_context(cfg)
         stats = run_migrate(
@@ -358,7 +365,8 @@ def _h_migrate(args: Dict[str, Any]) -> Dict[str, Any]:
         out["run_id"] = run_id
         return out
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
 def _h_resume(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -372,7 +380,8 @@ def _h_resume(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": "no manifest to resume at {}".format(manifest_path)}
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     try:
         stats = run_migrate(
             src, tgt, schema=cfg.source.schema, registry=build_type_registry(cfg),
@@ -384,7 +393,8 @@ def _h_resume(args: Dict[str, Any]) -> Dict[str, Any]:
         out["run_id"] = run_id
         return out
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
 # Admin (CDC capture/apply + config write) ------------------------------------

@@ -89,7 +89,7 @@ def _eta_seconds(rows_loaded: int, rows_est: int, elapsed: Optional[float]) -> O
 
 
 def render_snapshot(snapshot: dict, elapsed: Optional[float] = None,
-                    eta: Optional[float] = None):  # type: ignore[no-untyped-def]
+                    eta: Optional[float] = None):
     """Build a Rich renderable (table + totals panel) from a snapshot dict.
 
     Pure: no I/O, no TTY, deterministic given its arguments. ``elapsed`` and
@@ -193,7 +193,7 @@ def render_snapshot(snapshot: dict, elapsed: Optional[float] = None,
 
 
 def run_monitor(manifest_path: str, run_id: str, interval: float = 1.0,
-                once: bool = False, console=None) -> int:  # type: ignore[no-untyped-def]
+                once: bool = False, console=None) -> int:
     """Read-only refresh loop. Returns 0 when the run is complete, else 1.
 
     Opens the manifest read-only and polls ``progress_snapshot`` every
@@ -209,7 +209,7 @@ def run_monitor(manifest_path: str, run_id: str, interval: float = 1.0,
 
     start = time.monotonic()
 
-    def snap():  # type: ignore[no-untyped-def]
+    def snap():
         # Reopen read-only each tick. A RocksDB read-only handle is pinned at
         # open-time, so the embedded-Nano backend only sees fresh progress on a
         # reopen; sqlite WAL is fine either way. The backend is auto-detected

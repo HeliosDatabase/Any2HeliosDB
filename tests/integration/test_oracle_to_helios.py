@@ -99,7 +99,8 @@ def test_oracle_to_helios_migrate_and_validate():
     cfg = _cfg()
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     try:
         stats = migrate(src, tgt, schema="HR", registry=build_type_registry(cfg))
         assert stats.tables == 2
@@ -112,7 +113,8 @@ def test_oracle_to_helios_migrate_and_validate():
             res = run_test_data(src, tgt, t, sample_rows=0)
             assert res.passed, "TEST_DATA failed for {}: {}".format(t.name, res.errors)
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
 def _ensure_sample():
@@ -163,7 +165,8 @@ def test_resumable_migrate_then_resume_no_duplicates(tmp_path):
 
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     try:
         migrate(src, tgt, schema="HR", registry=build_type_registry(cfg),
                 cfg=cfg, manifest_path=manifest_path, run_id=run_id, parallelism=2)
@@ -182,7 +185,8 @@ def test_resumable_migrate_then_resume_no_duplicates(tmp_path):
                 parallelism=2, do_schema=False)
         assert run_test_count(src, tgt, schema.tables).passed, "duplicates after resume"
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
 
 
 def test_cdc_snapshot_then_incremental(tmp_path):
@@ -213,7 +217,8 @@ def test_cdc_snapshot_then_incremental(tmp_path):
     cfg.options.output_dir = str(tmp_path)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     try:
         migrate(src, tgt, schema="HR", registry=build_type_registry(cfg))
         # snapshot capture + idempotent apply over already-migrated data
@@ -229,7 +234,8 @@ def test_cdc_snapshot_then_incremental(tmp_path):
         ocur.execute("INSERT INTO employees (emp_id,full_name,email,salary,hired,active,dept_id) "
                      "VALUES (6,'Katherine Johnson','kj@example.com',95000,:1,1,20)",
                      [datetime.datetime(2022, 2, 2)])
-        oc.commit(); oc.close()
+        oc.commit()
+        oc.close()
 
         captured = run_extract(cfg, "it")["captured"]
         assert captured >= 2, "incremental capture missed changes ({} captured)".format(captured)
@@ -245,10 +251,12 @@ def test_cdc_snapshot_then_incremental(tmp_path):
         oc = oracledb.connect(user=ORA_USER, password=ORA_PW, dsn=ORA_DSN)
         ocur = oc.cursor()
         ocur.execute("DELETE FROM employees WHERE emp_id=6")
-        oc.commit(); oc.close()
+        oc.commit()
+        oc.close()
         run_extract(cfg, "it")
         res = run_replicat(cfg, "it")
         assert res["deleted"] >= 1, "delete reconciliation did not remove the row"
         assert tgt.query("SELECT count(*) FROM employees WHERE emp_id=6")[0][0] == 0
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()

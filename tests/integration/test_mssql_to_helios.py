@@ -91,7 +91,8 @@ def test_mssql_to_helios_migrate_and_validate():
     cfg = _cfg()
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect(); tgt.connect()
+    src.connect()
+    tgt.connect()
     try:
         stats = migrate(src, tgt, schema="dbo", registry=build_type_registry(cfg))
         assert stats.tables == 2
@@ -104,4 +105,5 @@ def test_mssql_to_helios_migrate_and_validate():
             res = run_test_data(src, tgt, t, sample_rows=0)
             assert res.passed, "TEST_DATA failed for {}: {}".format(t.name, res.errors)
     finally:
-        src.close(); tgt.close()
+        src.close()
+        tgt.close()
