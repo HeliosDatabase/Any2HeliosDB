@@ -95,6 +95,7 @@ def benchmark(args) -> Dict:
         "p95_ms": round(statistics.median(r["p95_ms"] for r in sel_rates), 3),
     }
     return {"label": args.label, "reps": args.reps, "rows": args.rows, "selects": args.selects,
+            "updates": args.updates,
             "phases": {
                 "insert_bulk": {"ops_per_sec": round(args.rows / insert_secs, 1) if insert_secs else 0.0,
                                 "p50_ms": 0.0, "p95_ms": 0.0},
@@ -104,7 +105,7 @@ def benchmark(args) -> Dict:
 
 def print_report(res: Dict) -> None:
     print("Benchmark: {} (reps={}, rows={}, selects={}, updates={})".format(
-        res.get("label", "?"), res["reps"], res["rows"], res["selects"], res["updates"]))
+        res.get("label", "?"), res["reps"], res["rows"], res["selects"], res.get("updates", 0)))
     print("  {:12} {:>14} {:>10} {:>10}".format("phase", "ops/sec", "p50 ms", "p95 ms"))
     for phase, m in res["phases"].items():
         print("  {:12} {:>14} {:>10} {:>10}".format(phase, m["ops_per_sec"], m["p50_ms"], m["p95_ms"]))
