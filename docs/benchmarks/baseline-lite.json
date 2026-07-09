@@ -1,0 +1,19 @@
+{
+  "label": "baseline-lite-2026-07-09",
+  "reps": 3,
+  "rows": 80,
+  "selects": 6000,
+  "updates": 0,
+  "phases": {
+    "insert_bulk": {
+      "ops_per_sec": 259.1,
+      "p50_ms": 0.0,
+      "p95_ms": 0.0
+    },
+    "select": {
+      "ops_per_sec": 5959.7,
+      "p50_ms": 0.163,
+      "p95_ms": 0.203
+    }
+  }
+}
