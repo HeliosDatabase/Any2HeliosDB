@@ -47,7 +47,7 @@ class Chunk:
         return "{c} >= {lo} AND {c} < {hi}".format(c=c, lo=self.lo, hi=self.hi)
 
 
-def compute_chunks(source, table: Table, target_chunks: int = 4) -> List[Chunk]:  # type: ignore[no-untyped-def]
+def compute_chunks(source, table: Table, target_chunks: int = 4) -> List[Chunk]:
     """Return the chunk list for *table*, aiming for ~*target_chunks* pieces."""
     pk = table.primary_key
     if pk and len(pk.columns) == 1 and target_chunks > 1:

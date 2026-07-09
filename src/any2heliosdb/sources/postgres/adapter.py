@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ...constants import SourceDialect
 from ...core.identifiers import quote_ident as _shared_quote_ident
@@ -30,7 +30,7 @@ from ...core.catalog_model import (
     IndexColumn,
     PrimaryKey,
     Schema,
-    Sequence,
+    Sequence as SequenceModel,
     Table,
     View,
 )
@@ -120,7 +120,7 @@ class PostgresAdapter(SourceAdapter):
 
     def __init__(self, dsn: SourceDsn) -> None:
         super().__init__(dsn)
-        self._conn = None  # type: ignore[assignment]
+        self._conn: Any = None
 
     # --- lifecycle -------------------------------------------------------
     def connect(self) -> None:
@@ -129,7 +129,7 @@ class PostgresAdapter(SourceAdapter):
         # SourceDsn names the database in either .database or .service_name; map
         # whichever is set onto psycopg's dbname (default 'postgres').
         dbname = self.dsn.database or self.dsn.service_name or "postgres"
-        kw = {
+        kw: Dict[str, Any] = {
             "host": self.dsn.host, "port": self.dsn.port, "user": self.dsn.user,
             "dbname": dbname, "autocommit": True,
         }
@@ -163,7 +163,7 @@ class PostgresAdapter(SourceAdapter):
                 self._conn = None
 
     @property
-    def conn(self):  # type: ignore[no-untyped-def]
+    def conn(self):
         if self._conn is None:
             raise SourceConnectionError("adapter is not connected; call connect() first")
         return self._conn
@@ -484,7 +484,7 @@ class PostgresAdapter(SourceAdapter):
                 out.append(View(name=vname, schema=ns, definition=body))
         return out
 
-    def _sequences(self, ns: str) -> List[Sequence]:
+    def _sequences(self, ns: str) -> List[SequenceModel]:
         """Introspect sequences (incl. SERIAL/IDENTITY-owned) so the target can
         recreate them with the correct resume point.
 
@@ -506,7 +506,7 @@ class PostgresAdapter(SourceAdapter):
                         "SELECT sequence_name, increment, minimum_value, maximum_value, "
                         "cycle_option, start_value FROM information_schema.sequences "
                         "WHERE sequence_schema=%s ORDER BY sequence_name", ns)]
-        out: List[Sequence] = []
+        out: List[SequenceModel] = []
         for (name, inc, minv, maxv, cycle, cache, start_value) in rows:
             inc_i = _as_int(inc) or 1
             start = _as_int(start_value) or 1
@@ -516,7 +516,7 @@ class PostgresAdapter(SourceAdapter):
                 last = _as_int(cur[0])
                 if last is not None:
                     start = (last + inc_i) if bool(cur[1]) else last
-            out.append(Sequence(
+            out.append(SequenceModel(
                 name=name, start=start, increment=inc_i,
                 min_value=_as_int(minv), max_value=_as_int(maxv),
                 cache=(_as_int(cache) or 1), cycle=bool(cycle), schema=ns))
@@ -528,7 +528,7 @@ class PostgresAdapter(SourceAdapter):
         row = self._q1("SELECT count(*) FROM {}".format(table_ref(ns, table.name)))
         return int(row[0]) if row and row[0] is not None else 0
 
-    def numeric_pk_bounds(self, table: Table, pk_col: str):  # type: ignore[no-untyped-def]
+    def numeric_pk_bounds(self, table: Table, pk_col: str):
         ns = table.schema or self.default_schema()
         # Bare (unquoted-when-safe) column + table: HeliosDB returns NULL for a
         # quoted MIN("emp_id"), but resolves the bare form.

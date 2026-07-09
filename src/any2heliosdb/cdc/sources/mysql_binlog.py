@@ -60,7 +60,7 @@ def _require_full_row_image(settings: Dict[str, str]) -> None:
                     var, want, var, got, why, var, want))
 
 
-def _check_image_columns(table: str, op: str, image_keys, expected_cols) -> None:  # type: ignore[no-untyped-def]
+def _check_image_columns(table: str, op: str, image_keys, expected_cols) -> None:
     """Raise if a captured row image is missing columns or carries placeholders.
 
     A FULL row image/metadata stream names every column; a MINIMAL one drops
@@ -85,7 +85,7 @@ def _check_image_columns(table: str, op: str, image_keys, expected_cols) -> None
 
 
 class MySqlBinlogSource:
-    def __init__(self, dsn, schema, tables, server_id: int = 4279):  # type: ignore[no-untyped-def]
+    def __init__(self, dsn, schema, tables, server_id: int = 4279):
         self.dsn = dsn
         self.schema = schema
         self.server_id = server_id
@@ -98,7 +98,7 @@ class MySqlBinlogSource:
                 "user": self.dsn.user, "passwd": self.dsn.password or ""}
 
     @staticmethod
-    def _read_row_image_vars(cur) -> Dict[str, str]:  # type: ignore[no-untyped-def]
+    def _read_row_image_vars(cur) -> Dict[str, str]:
         """Read the binlog_* variables that gate lossless capture into a dict."""
         out: Dict[str, str] = {}
         for var, _want, _why in _REQUIRED_VARS:

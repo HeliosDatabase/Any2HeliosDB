@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from ..chunking.pk_range import Chunk, compute_chunks
+from .catalog_model import Table
 from . import manifest as M
 from .identifiers import fold as _ident
 from .manifest import Manifest
@@ -38,7 +39,7 @@ class LoadStats:
 class ResumableLoader:
     def __init__(self, cfg, schema, manifest_path, run_id, parallelism=4,
                  use_copy=True, preserve_case=False, fresh=False,
-                 concurrent_writes=True):  # type: ignore[no-untyped-def]
+                 concurrent_writes=True):
         self.cfg = cfg
         self.schema = schema
         self.manifest_path = manifest_path
@@ -58,7 +59,7 @@ class ResumableLoader:
         # recreated tables are reloaded instead of skipped as already-LOADED.
         self.fresh = fresh
         self._chunks: Dict[str, Chunk] = {}
-        self._table_by_fqn: Dict[str, object] = {}
+        self._table_by_fqn: Dict[str, Table] = {}
 
     # --- planning (deterministic; safe to call again on resume) ----------
     def plan(self) -> None:
@@ -184,7 +185,7 @@ class ResumableLoader:
             for c in pending:
                 self._safe_load(c)
 
-    def _safe_load(self, chunk_row) -> None:  # type: ignore[no-untyped-def]
+    def _safe_load(self, chunk_row) -> None:
         chunk = self._chunks.get(chunk_row.chunk_id)
         if chunk is None:
             return

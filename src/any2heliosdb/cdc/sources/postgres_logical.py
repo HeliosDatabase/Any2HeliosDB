@@ -183,7 +183,7 @@ def parse_change(data: str, schema: str, pk_by_table: Dict[str, List[str]],
 
 
 class PostgresLogicalSource:
-    def __init__(self, adapter, schema, tables, extract_name) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, adapter, schema, tables, extract_name) -> None:
         self.adapter = adapter
         self.schema = schema
         self.tables = tables

@@ -18,7 +18,7 @@ psycopg driver stays the portable default across every edition.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from ..emit.oracle_ddl import oracle_ident
 from ..errors import TargetConnectionError
@@ -37,7 +37,7 @@ class NativeOracleDriver(TargetDriver):
 
     def __init__(self, dsn: TargetDsn) -> None:
         super().__init__(dsn)
-        self._conn = None  # type: ignore[assignment]
+        self._conn: Any = None
 
     # --- lifecycle -------------------------------------------------------
     def connect(self) -> None:
@@ -83,7 +83,7 @@ class NativeOracleDriver(TargetDriver):
                 self._conn = None
 
     @property
-    def conn(self):  # type: ignore[no-untyped-def]
+    def conn(self):
         if self._conn is None:
             raise TargetConnectionError("driver is not connected; call connect() first")
         return self._conn
@@ -185,7 +185,7 @@ class NativeOracleDriver(TargetDriver):
         binds = ", ".join(":{}".format(i + 1) for i in range(len(columns)))
         return "INSERT INTO {} ({}) VALUES ({})".format(_oq(target_table), cols, binds)
 
-    def _bind_timestamps(self, cur, columns, rows) -> None:  # type: ignore[no-untyped-def]
+    def _bind_timestamps(self, cur, columns, rows) -> None:
         """Force datetime binds to TIMESTAMP so fractional seconds survive.
 
         python-oracledb defaults a ``datetime`` bind to ``DB_TYPE_DATE`` (the
