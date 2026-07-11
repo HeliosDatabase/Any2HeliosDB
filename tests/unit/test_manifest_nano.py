@@ -140,6 +140,37 @@ def test_concurrent_per_chunk_writers(tmp_path):
         chk.close()
 
 
+def test_get_chunks_replay_reader_matches_sqlite(tmp_path):
+    """The resume chunk-plan reader must behave identically on both backends — it's
+    the shared read API a resume replays, so a nano-manifest resume can't silently
+    diverge from a sqlite one."""
+    def run(man):
+        man.start_run(RID)
+        man.add_table(RID, T, "employees")
+        man.add_chunk(RID, T, "c0", predicate='"ID" >= 1 AND "ID" < 51', lo="1", hi="51")
+        man.add_chunk(RID, T, "c1", predicate='"ID" >= 51 AND "ID" < 101', lo="51", hi="101")
+        man.add_table(RID, "S.LOG", "log")
+        man.add_chunk(RID, "S.LOG", "log0")  # whole-table chunk: NULL predicate/bounds
+        man.set_chunk_state(RID, T, "c0", M.LOADED, rows_loaded=50)  # state irrelevant to replay
+        return [(r.table_fqn, r.chunk_id, r.predicate, r.bounds_lo, r.bounds_hi)
+                for r in man.get_chunks(RID)]
+
+    nano = _nano(tmp_path)
+    try:
+        nano_rows = run(nano)
+    finally:
+        nano.close()
+    sqlite = Manifest(os.path.join(str(tmp_path), "manifest.db"))
+    try:
+        sqlite_rows = run(sqlite)
+    finally:
+        sqlite.close()
+
+    assert nano_rows == sqlite_rows
+    assert nano_rows[0] == (T, "c0", '"ID" >= 1 AND "ID" < 51', "1", "51")
+    assert nano_rows[2] == ("S.LOG", "log0", None, None, None)
+
+
 def test_open_readonly_sees_flushed_writes_while_writer_open(tmp_path):
     """The live-monitor case: a fresh read-only open must see the writer's
     flushed progress even while the writer handle stays open."""
