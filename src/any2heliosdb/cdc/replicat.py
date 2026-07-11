@@ -8,38 +8,84 @@ skipped with a warning.
 Within a table the trail is an *ordered* stream of explicit I/U/D change
 records, so order is load-bearing: ``DELETE id=7`` then ``INSERT id=7`` must
 leave the row present. The apply therefore walks each table's records in
-arrival order, batching only maximal contiguous runs of the same op class
-(upsert vs delete) so the relative delete/upsert order is preserved while still
-amortizing the round-trips. (This is distinct from :meth:`reconcile_deletes`,
-the snapshot-source key-set diff that has no per-record order to honor.)
+arrival order, batching only maximal contiguous runs of the same **op kind** so
+the relative ordering is preserved while still amortizing the round-trips. The
+four kinds are:
+
+* ``delete`` — an explicit ``D`` record; a run is one batched ``delete_keys``.
+* ``full`` — an insert/update carrying the whole after-image; a run is one
+  batched ``upsert`` (the fast path, byte-identical to before this split).
+* ``partial`` — an update whose after-image *omits* columns (a PostgreSQL
+  unchanged-TOAST datum). Applied as a keyed ``update_columns`` of only the
+  present non-key columns, so the omitted column keeps its stored value on
+  *every* driver — not just the ON-CONFLICT ones. If the row is absent the
+  provided columns are inserted (nothing to preserve).
+* ``keymove`` — a primary-key-changing update (carries ``before_key``). Applied
+  as replay-idempotent, collision-free steps that use only ``update_columns`` /
+  ``delete_keys`` / an insert-of-provided (never a merge-upsert assumption): the
+  old-key row's non-key columns are refreshed in place (preserving an omitted
+  TOAST datum), then — if that row was present — the *new* key is cleared of any
+  stale replay leftover and the row is moved by updating its key columns; if the
+  old-key row was absent (a replay past the move) the already-moved row is
+  refreshed at the new key instead, inserting the provided columns only when the
+  row is absent everywhere. This preserves an omitted TOAST column across the
+  move on every driver, never deletes the *parent* (old-key) row (FK-safe on
+  immediate-checking targets), and re-applying the same slice — once, twice, or
+  resumed mid-slice — always converges to the same state with no unique
+  violation. See :meth:`Replicat._apply_keymove`.
+
+(This is distinct from :meth:`reconcile_deletes`, the snapshot-source key-set
+diff that has no per-record order to honor.)
 """
 from __future__ import annotations
 
-from typing import Dict, Iterator, List, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ..core.change_record import DELETE, ChangeRecord
 
 
-def _runs_by_op_class(recs: List[ChangeRecord]) -> Iterator[Tuple[bool, List[ChangeRecord]]]:
-    """Split records into maximal contiguous runs of one op class, in order.
+def _classify(r: ChangeRecord, pk: Sequence[str], cols: Sequence[str]) -> str:
+    """Bucket a record into one op kind: ``delete``/``full``/``partial``/``keymove``.
 
-    Yields ``(is_delete, run)``: ``is_delete`` True for a run of DELETEs, False
-    for a run of INSERT/UPDATE upserts. Splitting only at the upsert<->delete
-    boundary preserves the relative ordering that distinguishes ``D`` then ``I``
-    (row ends present) from ``I`` then ``D`` (row ends absent), while letting
-    same-class neighbors batch into one driver round-trip.
+    ``keymove`` takes precedence: a record whose ``before_key`` differs from its
+    (new) key moved the row and is handled as an in-place key-changing UPDATE,
+    regardless of whether its after-image is full or TOAST-partial. Otherwise a
+    non-delete record is ``full`` when its after-image covers every table column,
+    else ``partial`` (some column omitted, e.g. an unchanged-TOAST datum).
+    """
+    if r.op == DELETE:
+        return "delete"
+    if r.before_key:
+        old = tuple(r.before_key.get(c) for c in pk)
+        new = tuple(r.key.get(c) for c in pk)
+        if old != new:
+            return "keymove"
+    if all(c in r.after for c in cols):
+        return "full"
+    return "partial"
+
+
+def _runs_by_kind(
+    recs: List[ChangeRecord], pk: Sequence[str], cols: Sequence[str]
+) -> Iterator[Tuple[str, List[ChangeRecord]]]:
+    """Split records into maximal contiguous runs of one op kind, in order.
+
+    Splitting only at kind boundaries preserves the relative ordering that
+    distinguishes ``D`` then ``I`` (row ends present) from ``I`` then ``D`` (row
+    ends absent) — and keeps a key-move ahead of a later re-insert of the old
+    key — while letting same-kind neighbors batch into one driver round-trip.
     """
     run: List[ChangeRecord] = []
-    cur_is_delete = False
+    cur_kind = ""
     for r in recs:
-        is_delete = r.op == DELETE
-        if run and is_delete != cur_is_delete:
-            yield cur_is_delete, run
+        kind = _classify(r, pk, cols)
+        if run and kind != cur_kind:
+            yield cur_kind, run
             run = []
-        cur_is_delete = is_delete
+        cur_kind = kind
         run.append(r)
     if run:
-        yield cur_is_delete, run
+        yield cur_kind, run
 
 
 class Replicat:
@@ -50,6 +96,75 @@ class Replicat:
 
     def _ident(self, name: str) -> str:
         return name if self.preserve_case else name.lower()
+
+    def _is_keymove(self, r: ChangeRecord) -> bool:
+        """Whether *r* is a primary-key-changing UPDATE (a ``keymove``).
+
+        Mirrors :func:`_classify`'s keymove test using the record's own table
+        metadata, so the engine can segment a trail slice at keymove boundaries
+        without re-bucketing. A record for an unknown or PK-less table is never a
+        keymove (it is warned-and-skipped by :meth:`apply`).
+        """
+        t = self._by_name.get(r.table.upper())
+        if t is None or not (t.primary_key and t.primary_key.columns):
+            return False
+        pk = list(t.primary_key.columns)
+        cols = [c.name for c in t.columns]
+        return _classify(r, pk, cols) == "keymove"
+
+    def apply_barriered(
+        self,
+        records: List[ChangeRecord],
+        on_flush: Optional[Callable[[int], None]] = None,
+    ) -> Tuple[int, List[str]]:
+        """Apply *records* with a durability barrier isolating every keymove.
+
+        A keymove is the one op whose replay is NOT target-state-idempotent:
+        whether the old-key row is "not yet moved" or "a different logical row
+        that later reused the key" is undecidable from target state, so replaying
+        a keymove together with a neighbouring record can converge to the wrong
+        row (the impostor). This method therefore splits the trail-ordered records
+        so that each keymove is applied ALONE, invoking ``on_flush(consumed)``
+        after every segment — where ``consumed`` is the cumulative number of
+        records durably applied so far. The engine uses ``on_flush`` to persist
+        the apply cursor, so a crash can only ever force a keymove to REPLAY by
+        itself (proven convergent), never batched with the record before or after
+        it. Non-keymove records between keymoves batch into one segment, so a slice
+        with no keymove flushes exactly once at the end — today's per-slice
+        behaviour, byte-identical.
+
+        Returns the same ``(applied, warnings)`` pair as :meth:`apply`.
+        """
+        total_applied = 0
+        warnings: List[str] = []
+        consumed = 0
+        batch: List[ChangeRecord] = []
+
+        def flush_batch() -> None:
+            nonlocal total_applied, consumed
+            if not batch:
+                return
+            a, w = self.apply(batch)
+            total_applied += a
+            warnings.extend(w)
+            consumed += len(batch)
+            batch.clear()
+            if on_flush is not None:
+                on_flush(consumed)
+
+        for r in records:
+            if self._is_keymove(r):
+                flush_batch()  # persist the cursor up to (but not incl.) the keymove
+                a, w = self.apply([r])
+                total_applied += a
+                warnings.extend(w)
+                consumed += 1
+                if on_flush is not None:
+                    on_flush(consumed)  # persist past the keymove — it replayed alone
+            else:
+                batch.append(r)
+        flush_batch()
+        return total_applied, warnings
 
     def apply(self, records: List[ChangeRecord]) -> Tuple[int, List[str]]:
         buckets: Dict[str, List[ChangeRecord]] = {}
@@ -65,22 +180,153 @@ class Replicat:
                 continue
             target_table = t.target_name(self.preserve_case)
             cols = [c.name for c in t.columns]
-            tcols = [self._ident(c) for c in cols]
             key_cols = [self._ident(c) for c in t.primary_key.columns]
-            pk = t.primary_key.columns
+            pk = list(t.primary_key.columns)
 
-            # Apply in arrival order, flushing one op class at a time so that an
-            # earlier DELETE is never resurrected by a later batched upsert (and
-            # vice versa). Contiguous same-class records are coalesced into a
-            # single driver call to keep the round-trip count low.
-            for is_delete, run in _runs_by_op_class(recs):
-                if is_delete:
+            # Apply in arrival order, one op kind at a time so an earlier DELETE is
+            # never resurrected by a later batched upsert (and vice versa) and a
+            # key-move stays ahead of a re-insert of the old key. Contiguous
+            # same-kind records coalesce into a single driver call where possible.
+            for kind, run in _runs_by_kind(recs, pk, cols):
+                if kind == "delete":
                     keys = [[r.key.get(c) for c in pk] for r in run]
                     applied += self.target.delete_keys(target_table, key_cols, keys)
-                else:
+                elif kind == "full":
+                    # Full after-images batch into one upsert (the fast path).
+                    full_idents = [self._ident(c) for c in cols]
                     rows = [[r.after.get(c) for c in cols] for r in run]
-                    applied += self.target.upsert(target_table, key_cols, tcols, rows)
+                    applied += self.target.upsert(target_table, key_cols, full_idents, rows)
+                elif kind == "partial":
+                    applied += self._apply_partial(target_table, key_cols, pk, cols, run)
+                else:  # keymove
+                    applied += self._apply_keymove(target_table, key_cols, pk, cols, run)
         return applied, warnings
+
+    def _apply_partial(
+        self,
+        target_table: str,
+        key_cols: List[str],
+        pk: Sequence[str],
+        cols: Sequence[str],
+        run: List[ChangeRecord],
+    ) -> int:
+        """Apply TOAST-partial UPDATEs as keyed column-subset UPDATEs.
+
+        Each record's after-image omits some columns (an unchanged-TOAST datum),
+        so a full-row upsert would NULL them on the DELETE+INSERT drivers. Instead
+        update only the present non-key columns WHERE the key matches; if the row
+        is absent (e.g. a replay that starts mid-stream), insert the columns we
+        have — there is no prior value to preserve. Per-record so each row's
+        matched/absent decision is independent (partial images are rare).
+        """
+        pk_set = set(pk)
+        applied = 0
+        for r in run:
+            present = [c for c in cols if c in r.after]
+            non_key = [c for c in present if c not in pk_set]
+            if not non_key:
+                continue  # only key columns present: a no-op UPDATE, nothing to do
+            set_idents = [self._ident(c) for c in non_key]
+            row = [r.after.get(c) for c in non_key] + [r.key.get(c) for c in pk]
+            matched = self.target.update_columns(target_table, key_cols, set_idents, [row])
+            if matched:
+                applied += matched
+            else:
+                present_idents = [self._ident(c) for c in present]
+                prow = [r.after.get(c) for c in present]
+                applied += self.target.upsert(target_table, key_cols, present_idents, [prow])
+        return applied
+
+    def _refresh_or_probe(
+        self,
+        target_table: str,
+        key_cols: List[str],
+        non_key: Sequence[str],
+        r: ChangeRecord,
+        key_vals: Sequence[object],
+    ) -> int:
+        """UPDATE the after-image's non-key columns at *key_vals*; return rows matched.
+
+        ``update_columns`` writes only the named columns, so an omitted (unchanged-
+        TOAST) column keeps its stored value on every driver and the matched row is
+        never DELETE+INSERT-clobbered. Its return is the rows *matched* — the base
+        contract, honoured by all three drivers (the native/psycopg UPDATE counts a
+        matched row even when values are unchanged; the MySQL driver connects with
+        ``CLIENT_FOUND_ROWS`` so a value-unchanged UPDATE also reports the match) —
+        which the caller uses as an existence probe. When the record carries *no*
+        non-key column (a key-only image, e.g. a table whose only non-key column is
+        an omitted TOAST datum), fall back to a matched-count no-op — set the first
+        key column to its own value at *key_vals* — which probes existence without
+        changing the row or risking a collision.
+        """
+        if non_key:
+            set_idents = [self._ident(c) for c in non_key]
+            row = [r.after.get(c) for c in non_key] + list(key_vals)
+            return self.target.update_columns(target_table, key_cols, set_idents, [row])
+        probe_row = [key_vals[0]] + list(key_vals)
+        return self.target.update_columns(target_table, key_cols, [key_cols[0]], [probe_row])
+
+    def _apply_keymove(
+        self,
+        target_table: str,
+        key_cols: List[str],
+        pk: Sequence[str],
+        cols: Sequence[str],
+        run: List[ChangeRecord],
+    ) -> int:
+        """Apply primary-key-changing UPDATEs as replay-idempotent, collision-free steps.
+
+        A keymove carries the row's OLD key (``before_key``) and the new after-image
+        (new key + provided columns ``P``, which may OMIT an unchanged-TOAST column).
+        We move the row using only ``update_columns`` / ``delete_keys`` / an
+        insert-of-provided so that applying the same trail slice once, twice, or
+        resumed mid-slice all converge to the identical target state — with no unique
+        violation and no lost TOAST datum — on BOTH the merge-upsert drivers
+        (psycopg/MySQL) and the DELETE+INSERT driver (native):
+
+          1. Refresh the not-yet-moved OLD-key row's non-key columns of ``P`` in
+             place (:meth:`_refresh_or_probe`). This preserves an omitted TOAST
+             column and can never collide; its matched count is our existence probe.
+          2. If the old-key row was present, clear the NEW key of any stale row left
+             by a previous partial/complete replay of THIS move (the source cannot
+             hold a live row at the new key at this stream point, so the delete is
+             convergent — and it is never the parent/old-key row), then move the row
+             by updating its key columns WHERE the old key. With the new-key slot
+             cleared first, the move can never raise a unique violation on replay.
+          3. Otherwise the row was already moved (a replay past step 2): refresh it
+             at the NEW key (again preserving an omitted TOAST datum — an ``UPDATE``
+             never deletes). Only if that matches nothing is the row absent
+             everywhere, in which case the provided columns are inserted (an omitted
+             TOAST value is then genuinely unrecoverable — see docs/cdc.md).
+             ``upsert`` is used for that insert purely as an insert into a
+             known-empty slot; correctness does not rely on its merge behaviour, and
+             using it (rather than a raw INSERT) keeps the step idempotent if the row
+             reappears under replay.
+        """
+        pk_set = set(pk)
+        key_idents = [self._ident(c) for c in pk]
+        applied = 0
+        for r in run:
+            present = [c for c in cols if c in r.after]
+            non_key = [c for c in present if c not in pk_set]
+            old_key_vals = [r.before_key.get(c) for c in pk]
+            new_key_vals = [r.key.get(c) for c in pk]
+            n_old = self._refresh_or_probe(target_table, key_cols, non_key, r, old_key_vals)
+            if n_old >= 1:
+                # Old-key row present: clear a stale new-key row, then move it over.
+                self.target.delete_keys(target_table, key_cols, [new_key_vals])
+                self.target.update_columns(
+                    target_table, key_cols, key_idents, [new_key_vals + old_key_vals])
+            else:
+                # Old-key row absent -> already moved (replay). Refresh at the new
+                # key, preserving any omitted column; insert only if absent everywhere.
+                n_new = self._refresh_or_probe(target_table, key_cols, non_key, r, new_key_vals)
+                if not n_new:
+                    present_idents = [self._ident(c) for c in present]
+                    prow = [r.after.get(c) for c in present]
+                    self.target.upsert(target_table, key_cols, present_idents, [prow])
+            applied += 1
+        return applied
 
     def reconcile_deletes(self, source_adapter) -> Tuple[int, List[str]]:
         """Delete target rows whose PK is absent from the source's current keys.

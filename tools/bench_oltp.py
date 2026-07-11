@@ -111,13 +111,28 @@ def print_report(res: Dict) -> None:
         print("  {:12} {:>14} {:>10} {:>10}".format(phase, m["ops_per_sec"], m["p50_ms"], m["p95_ms"]))
 
 
-def compare(baseline_path: str, current_path: str, threshold: float) -> int:
+def compare(baseline_path: str, current_path: str, threshold: float,
+            gate_phases: str = "select") -> int:
+    """Exit non-zero when a GATED phase regresses below the threshold.
+
+    Only the phases named in ``gate_phases`` (comma-separated; "all" gates every
+    phase) drive the exit code; other phases are printed for reference. Default
+    is "select" per docs/benchmarks/BASELINE.md: the select hot path is the gate
+    metric, while insert_bulk is a single small transaction whose "ops/sec" is
+    commit-latency dominated and empirically swings ±10% on identical code —
+    gating on it turns environmental noise into false regressions (team ruling,
+    2026-07-11).
+    """
     with open(baseline_path) as f:
         base = json.load(f)
     with open(current_path) as f:
         cur = json.load(f)
-    print("Comparison: baseline='{}' vs current='{}'  (regression threshold {:.0%})".format(
-        base.get("label", baseline_path), cur.get("label", current_path), threshold))
+    gated = {p.strip() for p in gate_phases.split(",") if p.strip()}
+    gate_all = "all" in gated
+    print("Comparison: baseline='{}' vs current='{}'  (regression threshold {:.0%}, "
+          "gating: {})".format(base.get("label", baseline_path),
+                               cur.get("label", current_path), threshold,
+                               "all phases" if gate_all else ", ".join(sorted(gated))))
     print("  {:12} {:>12} {:>12} {:>9}  {}".format("phase", "base ops/s", "cur ops/s", "ratio", "verdict"))
     regressed = False
     for phase in base["phases"]:
@@ -127,8 +142,11 @@ def compare(baseline_path: str, current_path: str, threshold: float) -> int:
         c = cur["phases"][phase]["ops_per_sec"]
         ratio = (c / b) if b else 1.0
         ok = ratio >= threshold
-        regressed = regressed or (not ok)
-        print("  {:12} {:>12} {:>12} {:>8.2f}x  {}".format(phase, b, c, ratio, "OK" if ok else "REGRESSION"))
+        is_gated = gate_all or phase in gated
+        regressed = regressed or (is_gated and not ok)
+        verdict = ("OK" if ok else "REGRESSION") if is_gated else \
+            ("ok (info)" if ok else "low (info, not gated)")
+        print("  {:12} {:>12} {:>12} {:>8.2f}x  {}".format(phase, b, c, ratio, verdict))
     print("RESULT:", "REGRESSION DETECTED" if regressed else "no regression")
     return 1 if regressed else 0
 
@@ -148,10 +166,14 @@ def main() -> int:
     ap.add_argument("--json", default="")
     ap.add_argument("--compare", nargs=2, metavar=("BASELINE", "CURRENT"))
     ap.add_argument("--threshold", type=float, default=0.97)
+    ap.add_argument("--gate-phases", default="select",
+                    help="comma-separated phases that drive --compare's exit code "
+                         "('all' = every phase); others print as info. Default "
+                         "'select' per docs/benchmarks/BASELINE.md.")
     args = ap.parse_args()
 
     if args.compare:
-        return compare(args.compare[0], args.compare[1], args.threshold)
+        return compare(args.compare[0], args.compare[1], args.threshold, args.gate_phases)
     res = benchmark(args)
     print_report(res)
     if args.json:
