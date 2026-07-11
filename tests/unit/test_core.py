@@ -106,9 +106,11 @@ def test_concurrent_writes_gated_by_edition():
     assert supports_concurrent_writes(Edition.LITE) is False
     assert supports_concurrent_writes(Edition.FULL) is True
     assert supports_concurrent_writes(Edition.POSTGRES) is True
-    # Unknown targets are treated optimistically (the serial-retry pass still
-    # recovers any chunk that fails under contention).
-    assert supports_concurrent_writes(Edition.UNKNOWN) is True
+    # Unknown targets serialize (safe-serial): if the unrecognized target is
+    # really a Nano/Lite, a second concurrent writer BLOCKS instead of failing,
+    # and the mop-up pass only retries FAILED chunks — it can never recover a
+    # hang. Serial costs speed; optimistic costs a permanent hang.
+    assert supports_concurrent_writes(Edition.UNKNOWN) is False
     # Nano gained concurrent write txns in 3.60.7; older Nano still serializes.
     assert supports_concurrent_writes(Edition.NANO, "16.0 (HeliosDB Nano 3.60.7)") is True
     assert supports_concurrent_writes(Edition.NANO, "16.0 (HeliosDB Nano 3.61.0)") is True

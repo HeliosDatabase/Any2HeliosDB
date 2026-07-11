@@ -282,8 +282,15 @@ class MySQLTargetDriver(TargetDriver):
         where = " AND ".join("{} = %s".format(mysql_ident(k)) for k in key_cols)
         with self.conn.cursor() as cur:
             cur.executemany("DELETE FROM {} WHERE {}".format(_mq(target_table), where), materialized)
+            # Rows ACTUALLY deleted, not keys attempted — aligned with the
+            # psycopg driver's hardening: a silent no-op delete (key absent on
+            # the target) must surface as a count shortfall in CDC delete
+            # reconciliation, not be reported as done. PyMySQL's executemany
+            # exposes the total affected rowcount; -1 means "no tag" — report
+            # 0 rather than inventing a count.
+            affected = cur.rowcount
         self.conn.commit()
-        return len(materialized)
+        return affected if affected and affected > 0 else 0
 
     def truncate(self, target_table: str) -> None:
         self.execute("TRUNCATE TABLE {}".format(_mq(target_table)))

@@ -125,7 +125,12 @@ def supports_concurrent_writes(edition: Edition, server_version: str = "") -> bo
     Full and stock PostgreSQL always do. Lite never does. Nano did not until
     **3.60.7** — before that a second concurrent writer stalled, so a parallel
     load hung; the loader serializes for Lite and pre-3.60.7 Nano. An unparseable
-    Nano version is treated as too-old (serialize) to stay safe. See
+    Nano version is treated as too-old (serialize) to stay safe. An UNKNOWN
+    edition (garbled/absent banner) must ALSO serialize: if the unrecognized
+    target is actually a Nano/Lite, a second writer BLOCKS rather than errors,
+    so the parallel pass hangs permanently and the serial mop-up — which only
+    retries chunks that FAILED — never fires. Serial-on-unknown costs speed;
+    optimistic-on-unknown costs a hang. See
     :attr:`CapabilityMatrix.concurrent_writes`.
     """
     if edition is Edition.LITE:
@@ -135,6 +140,8 @@ def supports_concurrent_writes(edition: Edition, server_version: str = "") -> bo
         if not m:
             return False
         return tuple(int(g) for g in m.groups()) >= _NANO_CONCURRENT_WRITES_MIN
+    if edition is Edition.UNKNOWN:
+        return False
     return True
 
 
