@@ -45,7 +45,7 @@ run extract and replicat on different schedules or hosts (sharing the trail).
 | `a2h extract NAME -c config.toml` | Capture source changes into the `NAME` trail; advance the watermark. |
 | `a2h extract NAME --refresh-tables` | Adopt tables that appeared in the source since registration and snapshot-load their current rows (see [New tables](#new-tables-after-registration)). |
 | `a2h extract NAME --drop [--purge-trail]` | Tear the extract down: drop the PG logical slot + remove the registry entry (and, with `--purge-trail`, the trail dir). See [Slot lifecycle](#slot-lifecycle--lag). |
-| `a2h extract NAME --purge-applied` | Delete fully-applied closed trail segments to reclaim disk (see [Trail rotation](#trail-rotation--retention)). |
+| `a2h extract NAME --purge-applied` | Delete fully-applied closed trail segments to reclaim disk (see [Trail rotation](#trail-rotation--retention-trail_rotate_mb)). |
 | `a2h replicat NAME -c config.toml` | Apply the `NAME` trail to the target (idempotent); advance the apply cursor. |
 | `a2h extracts -c config.toml [--lag]` | List extracts with schema, table count, watermark, cursor, state, dead-letter count, and (with `--lag`) replication lag. |
 
@@ -69,7 +69,7 @@ $ a2h extract cdc1 -c config.toml
 extract cdc1: captured 2 change(s) (incremental since SCN 2547881); watermark=2547990
 
 $ a2h replicat cdc1 -c config.toml
-replicat cdc1: applied 2 change(s) from 2 read; cursor=10
+replicat cdc1: applied 2 change(s), deleted 0, from 2 read; cursor=10
 
 $ a2h extracts -c config.toml
   cdc1             schema=HR tables=2 watermark=2547990 cursor=10 state=applying
@@ -451,7 +451,10 @@ enforce FKs (e.g. HeliosDB-Lite in parse-only mode) are unaffected.
 These make a long-running CDC pipeline safe to leave unattended — bounded memory,
 new-table visibility, slot cleanup, poison isolation, and trail retention. Every
 knob is a `[cdc]` config key ([configuration.md](guides/configuration.md#cdc-change-data-capture-tuning));
-each operator action is a CLI flag with MCP parity.
+each operator action is a CLI flag with MCP parity. For the day-to-day operator
+workflow — scheduling, lag monitoring, disk reclaim, dead-letter triage, teardown,
+and a recovery cheatsheet — see the
+[CDC operations runbook](guides/cdc-operations.md).
 
 ### Bounded memory (`capture_batch` / `apply_batch`)
 

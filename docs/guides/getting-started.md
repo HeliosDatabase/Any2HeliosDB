@@ -14,7 +14,7 @@ to the migration guide for your target:
   client install). You need a user that can read the `ALL_*` data-dictionary views
   for the schema you're migrating, plus `SELECT` on its tables.
 - **A running HeliosDB target** (Nano, Lite, or Full) reachable over the
-  PostgreSQL wire protocol — see the [compatibility matrix](../README.md#compatibility-matrix)
+  PostgreSQL wire protocol — see the [compatibility matrix](../../README.md#compatibility-matrix)
   for the minimum build per edition.
 - For CDC capture, ideally `SELECT` on a flashback function (`dbms_flashback` or
   `timestamp_to_scn`) so the watermark advances; without it the engine falls back
@@ -141,6 +141,11 @@ transaction). `load_mode` is `copy` when the probe allowed COPY, else `insert`
 The run is tracked in a SQLite manifest at `<output_dir>/manifest.db`
 (default `./migration_output/manifest.db`).
 
+To watch a long migration live, run `a2h monitor -c config.toml` in another
+terminal — a read-only full-screen dashboard (per-table progress, volume left,
+ETA) that attaches to the same run (see the
+[CLI reference](../reference/cli.md#a2h-monitor)).
+
 ## Step 6 — status & resume
 
 If a load is interrupted, inspect and continue it:
@@ -201,14 +206,17 @@ $ a2h extract cdc1 -c config.toml
 extract cdc1: captured 2 change(s) (incremental since SCN 2547881); watermark=2547990
 
 $ a2h replicat cdc1 -c config.toml
-replicat cdc1: applied 2 change(s) from 2 read; cursor=10
+replicat cdc1: applied 2 change(s), deleted 0, from 2 read; cursor=10
 
 $ a2h extracts -c config.toml
   cdc1             schema=HR tables=2 watermark=2547990 cursor=10 state=applying
 ```
 
-> CDC support is edition-specific: **validated on Full**, **blocked on Lite** by a
-> NUMERIC bug, and **n/a on Nano**. See your migration guide.
+> CDC apply (`replicat`) is **validated on HeliosDB-Full and HeliosDB-Lite**, and
+> on **HeliosDB-Nano ≥ 3.58.5** (older Nano builds are refused with a clear
+> error). MySQL binlog and PostgreSQL logical decoding are also supported as
+> log-based sources. See [docs/cdc.md](../cdc.md), the
+> [operations runbook](cdc-operations.md), and your migration guide.
 
 ## `config.toml` reference
 
@@ -251,6 +259,15 @@ drop_existing = true                 # DROP target tables before re-creating
 # "hr.emp.salary" = "numeric(12,2)"
 ```
 
+This is the starter set. Additional keys the wizard does not prompt for exist and
+are documented in full in [configuration](configuration.md): a `mysql`
+migrate-back [`[target].driver`](configuration.md#driver-selection),
+[`manifest_backend = "nano"`](configuration.md#options) for the embedded-Nano
+resume ledger, the Oracle thick-mode options (`thick` / `client_dir` / `sysdba`)
+for Native-Network-Encryption servers, and a whole
+[`[cdc]`](configuration.md#cdc-change-data-capture-tuning) section that tunes the
+CDC pipeline. Prefer editing those there rather than duplicating this block.
+
 ## Where to next
 
 - **[Configuration](configuration.md)** — every field, env-var passwords, driver
@@ -259,5 +276,8 @@ drop_existing = true                 # DROP target tables before re-creating
   [Full](../migration/oracle-to-heliosdb-full.md),
   [Nano](../migration/oracle-to-heliosdb-nano.md).
 - **[CLI reference](../reference/cli.md)** — every command and option.
+- **[MCP server](../mcp.md)** — expose the whole toolkit as MCP tools
+  (`a2h mcp serve`, Bearer auth + RBAC) so an AI agent can drive a migration
+  remotely.
 - **[Troubleshooting](../troubleshooting.md)** — common errors and the per-edition
   HeliosDB gaps.

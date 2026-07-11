@@ -19,6 +19,9 @@ Start with the [project README](../README.md) for the tagline, install, and the
 - **[Worked examples](guides/examples.md)** — copy-pasteable end-to-end scenarios:
   Oracle/MySQL/SQL Server → HeliosDB, HeliosDB → MySQL migrate-back, CDC
   (SCN-watermark + MySQL binlog), interrupted-load resume, and type overrides.
+- **[CDC operations runbook](guides/cdc-operations.md)** — running CDC unattended:
+  scheduling, lag monitoring, trail retention, dead-letter triage, slot teardown,
+  and a fail-closed recovery cheatsheet.
 
 ## Migration guides (per validated target)
 
