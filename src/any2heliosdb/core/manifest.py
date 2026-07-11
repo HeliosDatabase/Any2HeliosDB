@@ -215,6 +215,20 @@ class ChunkRow:
     attempts: int
 
 
+@dataclass
+class RecordedChunk:
+    """One row of the recorded chunk PLAN (regardless of load state): the source
+    predicate and the integer key bounds exactly as the original plan stored them.
+    Replaying these on resume — instead of recomputing from live source bounds —
+    is what keeps a resumed load from silently skipping or double-loading PK
+    ranges when rows were inserted/deleted at the key edges mid-run."""
+    table_fqn: str
+    chunk_id: str
+    predicate: Optional[str]
+    bounds_lo: Optional[str]
+    bounds_hi: Optional[str]
+
+
 class Manifest:
     def __init__(self, path: str, readonly: bool = False, backend: str = SQLITE) -> None:
         self.path = path
@@ -308,6 +322,56 @@ class Manifest:
             "AND kind='snapshot'", (run_id,)).fetchone()
         return row is not None
 
+    def mark_plan_complete(self, run_id: str, complete: bool = True) -> None:
+        """Record whether this run's chunk plan is FULLY written to the ledger.
+
+        add_chunk commits per row, so a crash mid-planning (kill -9 / OOM / disk
+        full) leaves a syntactically-valid but PARTIAL plan. A resume must never
+        replay a partial plan as if complete — the missing tail ranges would be
+        silently skipped. The loader clears this flag before it starts (re)writing
+        a plan and sets it only after the last chunk row is recorded; a resume
+        replays ONLY when the flag is set (else it re-plans from scratch — safe,
+        because loading never starts before planning finishes). Same portable
+        ``watermarks`` KV row pattern as the snapshot token."""
+        self._db.execute(
+            "INSERT INTO watermarks (run_id, table_fqn, kind, value, captured_at) "
+            "VALUES (?, '__plan__', 'plan_complete', ?, '') "
+            "ON CONFLICT (run_id, table_fqn) DO UPDATE SET kind=excluded.kind, "
+            "value=excluded.value, captured_at=excluded.captured_at",
+            (run_id, "1" if complete else ""))
+        self._db.commit()
+
+    def plan_complete(self, run_id: str) -> bool:
+        row = self._db.execute(
+            "SELECT value FROM watermarks WHERE run_id=? AND table_fqn='__plan__' "
+            "AND kind='plan_complete'", (run_id,)).fetchone()
+        return bool(row and row[0] == "1")
+
+    def table_has_progress(self, run_id: str, table_fqn: str) -> bool:
+        """Whether any chunk of this table left the ``pending`` state.
+
+        Load-progress is the proof that a table's recorded plan is COMPLETE:
+        loading only ever starts after ``plan()`` fully finishes (marker set),
+        and chunks are never added to an already-planned table afterwards — so a
+        table with a loaded/in-progress/failed chunk cannot be mid-planning.
+        Used by the salvage path to keep resume progress when the plan-complete
+        marker was cleared by a crash during a later planning session."""
+        row = self._db.execute(
+            "SELECT 1 FROM chunks WHERE run_id=? AND table_fqn=? AND state != ? "
+            "LIMIT 1", (run_id, table_fqn, PENDING)).fetchone()
+        return row is not None
+
+    def delete_table_chunks(self, run_id: str, table_fqn: str) -> None:
+        """Drop one table's chunk rows so it can be re-planned from the live
+        source (salvage of a possibly-partial plan; only ever called for tables
+        with zero progress, so no LOADED bookkeeping is lost)."""
+        self._db.execute("DELETE FROM chunks WHERE run_id=? AND table_fqn=?",
+                         (run_id, table_fqn))
+        self._db.execute(
+            "UPDATE tables SET status='pending', total_chunks=0 "
+            "WHERE run_id=? AND table_fqn=?", (run_id, table_fqn))
+        self._db.commit()
+
     def add_table(self, run_id: str, table_fqn: str, target_table: str,
                   total_rows_est: int = 0) -> None:
         self._db.execute(
@@ -381,6 +445,22 @@ class Manifest:
             params.append(table_fqn)
         sql += " ORDER BY table_fqn, chunk_id"
         return [ChunkRow(*r) for r in self._db.execute(sql, params).fetchall()]
+
+    def get_chunks(self, run_id: str, table_fqn: Optional[str] = None) -> List[RecordedChunk]:
+        """The RECORDED chunk plan for a run (all states) — predicate + bounds as
+        first stored. This is the single source of truth a resume replays so a
+        drifted live source can't move a chunk's range out from under the ledger;
+        the loader rebuilds its in-memory plan from these rows rather than calling
+        ``compute_chunks`` again. Backend-agnostic (plain SELECT), so the sqlite
+        and embedded-Nano manifests replay identically. Deterministically ordered."""
+        sql = ("SELECT table_fqn, chunk_id, predicate, bounds_lo, bounds_hi FROM chunks "
+               "WHERE run_id=?")
+        params: list = [run_id]
+        if table_fqn:
+            sql += " AND table_fqn=?"
+            params.append(table_fqn)
+        sql += " ORDER BY table_fqn, chunk_id"
+        return [RecordedChunk(*r) for r in self._db.execute(sql, params).fetchall()]
 
     def is_chunk_done(self, run_id: str, table_fqn: str, chunk_id: str) -> bool:
         row = self._db.execute(
