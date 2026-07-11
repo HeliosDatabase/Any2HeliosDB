@@ -83,10 +83,53 @@ class Options:
 
 
 @dataclass
+class CdcConfig:
+    """Tunables for the CDC spine (Extract → trail → Replicat).
+
+    Every knob here bounds a resource the CDC pipeline would otherwise let grow
+    without limit (the reason tier-2 hardening is a priority after the host OOM):
+
+    * ``capture_batch`` — max change events a single ``extract`` cycle pulls from a
+      log-based source (PG logical peek ``LIMIT`` / MySQL binlog event stop). The
+      server-side cursor (slot LSN / binlog pos) is only advanced past what was
+      captured, so anything beyond the cap is simply picked up next cycle. ``0``
+      means "no cap" (the pre-tier-2 unbounded behaviour). The 50k default caps a
+      cycle's resident change list at tens of MB rather than a whole backlog.
+    * ``apply_batch`` — max trail LINES the ``replicat`` reads and applies per
+      bounded chunk, advancing the apply cursor per chunk. The keymove barrier
+      composes: each keymove is still flushed alone within its chunk. ``0`` means
+      "read the whole slice at once" (pre-tier-2 behaviour).
+    * ``poison_retries`` — how many times the replicat retries a single failing
+      (non-keymove) record before moving it to ``dead_letter.jsonl`` and advancing
+      past it, so one bad record can't wedge replication forever. ``0`` disables
+      the dead-letter policy (a failing record raises, as before). Keymoves are
+      NEVER dead-lettered — a keymove failure always fails closed. Before parking a
+      record the replicat ``ping()``s the target and re-raises (cursor unmoved) if
+      it is unreachable, so a transient target outage never dead-letters the whole
+      backlog.
+    * ``poison_max_per_run`` — a mass-poison circuit breaker: if a single replicat
+      run would dead-letter MORE than this many records it raises instead (cursor
+      unmoved for the offending chunk). A flood of "poison" almost always means an
+      environment problem (wrong target, a schema drift) rather than genuinely bad
+      data, so fail closed and let the operator look. ``0`` disables the breaker.
+    * ``trail_rotate_mb`` — rotate the active trail segment once it reaches this
+      many MB (closed segments become ``trail.NNNNN.jsonl``); the apply cursor
+      stays a single global line index across segments, so legacy single-file
+      trails keep working unchanged. ``0`` disables rotation (one ``trail.jsonl``).
+    """
+    capture_batch: int = 50_000
+    apply_batch: int = 10_000
+    poison_retries: int = 3
+    poison_max_per_run: int = 25
+    trail_rotate_mb: int = 256
+
+
+@dataclass
 class ProjectConfig:
     source: SourceConfig = field(default_factory=SourceConfig)
     target: TargetConfig = field(default_factory=TargetConfig)
     options: Options = field(default_factory=Options)
+    cdc: CdcConfig = field(default_factory=CdcConfig)
     # Ora2Pg-style overrides
     data_type: Dict[str, str] = field(default_factory=dict)
     modify_type: Dict[str, str] = field(default_factory=dict)

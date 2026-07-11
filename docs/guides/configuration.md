@@ -6,8 +6,8 @@ This page documents every field, derived from
 [`config/model.py`](../../src/any2heliosdb/config/model.py) and
 [`config/store.py`](../../src/any2heliosdb/config/store.py).
 
-The file has up to six tables: `[source]`, `[target]`, `[options]`, and the
-optional `[data_type]`, `[modify_type]`, and `[capability]`.
+The file has up to seven tables: `[source]`, `[target]`, `[options]`, `[cdc]`,
+and the optional `[data_type]`, `[modify_type]`, and `[capability]`.
 
 ## `[source]`
 
@@ -84,6 +84,35 @@ status` / `a2h monitor` / `a2h resume` need no extra flag. `migrate`, `status`,
 and `monitor` can run concurrently on the Nano backend: the loader holds the single
 RocksDB writer while read-only commands open their own read-only view. Keep
 `sqlite` unless you specifically want the embedded engine.
+
+## `[cdc]` (change-data-capture tuning)
+
+Tunables for the CDC spine (`a2h extract` / `replicat`). Every one bounds a
+resource the pipeline would otherwise let grow without limit — the tier-2
+hardening that followed a host OOM. All are optional; omit the whole section to
+accept the defaults.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `capture_batch` | int | `50000` | Max change events one `extract` cycle pulls from a **log-based** source (PostgreSQL logical peek `upto_nchanges` / MySQL binlog event stop). The server-side cursor (slot LSN / binlog pos) only advances past what was captured, so anything beyond the cap is picked up next cycle. `0` = no cap (the pre-tier-2 unbounded behaviour). Does not apply to the Oracle SCN-watermark scan. **PostgreSQL caveat:** the cap is checked at transaction boundaries, so it bounds the backlog of *committed transactions* — one huge transaction is still materialized whole. |
+| `apply_batch` | int | `10000` | Max trail **lines** the `replicat` reads and applies per bounded chunk, advancing the apply cursor per chunk. The keymove barrier composes — each keymove is still flushed alone within its chunk. Also the surplus-key delete batch size for delete reconciliation, and the buffer size for `--refresh-tables` snapshot appends. `0` = read the whole slice at once (pre-tier-2 behaviour). |
+| `poison_retries` | int | `3` | How many times the replicat retries a single failing **non-keymove** record before moving it to `dead_letter.jsonl` (beside the trail) and advancing past it, so one bad record can't wedge replication forever. Before parking a record the replicat `ping()`s the target and re-raises (cursor unmoved) if it is unreachable — a transient outage never dead-letters the backlog. `0` disables the policy — a failing record raises, as before. **Keymoves are never dead-lettered** (skipping one diverges key state); a keymove failure always fails closed. |
+| `poison_max_per_run` | int | `25` | Mass-poison circuit breaker: if one `replicat` run would dead-letter more than this many records it raises instead (cursor unmoved for the offending chunk). A flood of poison usually means an environment fault, not bad data. `0` disables the breaker. |
+| `trail_rotate_mb` | int | `256` | Rotate the active trail segment once it reaches this many MB; closed segments become `trail.NNNNN.jsonl`. The apply cursor stays a single **global line index** across segments, so a legacy single-file trail and its integer cursor keep working unchanged. `0` disables rotation (one `trail.jsonl`). Reclaim applied segments with `a2h extract NAME --purge-applied`. |
+
+```toml
+[cdc]
+capture_batch = 50000
+apply_batch = 10000
+poison_retries = 3
+poison_max_per_run = 25
+trail_rotate_mb = 256
+```
+
+See [Change data capture](../cdc.md) for the operational workflow behind each
+knob (bounded capture/apply, the poison dead-letter file, trail rotation +
+`--purge-applied`, new-table adoption with `--refresh-tables`, slot teardown
+with `--drop`, and lag reporting with `a2h extracts --lag`).
 
 ## Type overrides: `[data_type]` & `[modify_type]`
 

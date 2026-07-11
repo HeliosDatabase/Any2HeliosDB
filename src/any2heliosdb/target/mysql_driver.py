@@ -119,6 +119,10 @@ class MySQLTargetDriver(TargetDriver):
             cur.execute(sql, list(params) if params else None)
             return [tuple(r) for r in cur.fetchall()]
 
+    def ping(self) -> None:
+        """Liveness probe for the CDC poison-vs-outage decision (SELECT 1)."""
+        self.query("SELECT 1")
+
     def describe_columns(self, target_table: str) -> List[str]:
         with self.conn.cursor() as cur:
             cur.execute("SELECT * FROM {} LIMIT 0".format(_mq(target_table)))
