@@ -224,6 +224,8 @@ def migrate(config: str = CONFIG_OPT) -> None:
                                build_type_registry, load_config)
     from .core.orchestrator import migrate as run_migrate
 
+    from .core.loader import ResumeDriftError
+
     cfg = load_config(config)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
@@ -231,12 +233,17 @@ def migrate(config: str = CONFIG_OPT) -> None:
     tgt.connect()
     try:
         manifest_path, run_id = _run_context(cfg)
-        stats = run_migrate(
-            src, tgt, schema=cfg.source.schema, registry=build_type_registry(cfg),
-            drop_existing=cfg.options.drop_existing, preserve_case=cfg.options.preserve_case,
-            batch_size=cfg.options.batch_size, prefer_copy=cfg.options.prefer_copy,
-            cfg=cfg, manifest_path=manifest_path, run_id=run_id, parallelism=cfg.options.parallelism,
-        )
+        try:
+            stats = run_migrate(
+                src, tgt, schema=cfg.source.schema, registry=build_type_registry(cfg),
+                drop_existing=cfg.options.drop_existing, preserve_case=cfg.options.preserve_case,
+                batch_size=cfg.options.batch_size, prefer_copy=cfg.options.prefer_copy,
+                cfg=cfg, manifest_path=manifest_path, run_id=run_id, parallelism=cfg.options.parallelism,
+            )
+        except ResumeDriftError as e:
+            # A drop_existing=false re-run resumes the recorded plan; if it can't be
+            # replayed safely (e.g. a recorded table vanished) fail closed, cleanly.
+            _fail(str(e))
         console.print("[green]migrated[/green] {} tables, {} rows (load_mode={})".format(
             stats.tables, stats.total_rows, stats.load_mode))
         for tbl, n in stats.rows.items():
@@ -510,17 +517,24 @@ def resume(config: str = CONFIG_OPT) -> None:
     manifest_path, run_id = _run_context(cfg)
     if not os.path.exists(manifest_path):
         _fail("no manifest to resume at {} (run `a2h migrate` first)".format(manifest_path))
+    from .core.loader import ResumeDriftError
+
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
     src.connect()
     tgt.connect()
     try:
-        stats = run_migrate(
-            src, tgt, schema=cfg.source.schema, registry=build_type_registry(cfg),
-            drop_existing=False, preserve_case=cfg.options.preserve_case,
-            prefer_copy=cfg.options.prefer_copy, cfg=cfg, manifest_path=manifest_path,
-            run_id=run_id, parallelism=cfg.options.parallelism, do_schema=False,
-        )
+        try:
+            stats = run_migrate(
+                src, tgt, schema=cfg.source.schema, registry=build_type_registry(cfg),
+                drop_existing=False, preserve_case=cfg.options.preserve_case,
+                prefer_copy=cfg.options.prefer_copy, cfg=cfg, manifest_path=manifest_path,
+                run_id=run_id, parallelism=cfg.options.parallelism, do_schema=False,
+            )
+        except ResumeDriftError as e:
+            # Fail closed with the clear message (not a traceback): the recorded
+            # plan can't be replayed safely (e.g. a table vanished from the source).
+            _fail(str(e))
         console.print("[green]resumed[/green]: {} rows across {} tables".format(
             stats.total_rows, stats.tables))
         for w in stats.warnings:
