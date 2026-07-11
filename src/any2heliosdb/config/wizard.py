@@ -51,8 +51,11 @@ def smoke_test(cfg: ProjectConfig) -> Dict[str, object]:
         else:
             tgt.insert_rows("_a2h_smoke", ["n", "s"], [(1, ""), (2, None)])
         rows = tgt.query("SELECT n, s IS NULL AS s_null, s FROM _a2h_smoke ORDER BY n")
-        # row for n=1 must have '' (not NULL); n=2 must be NULL
-        fidelity_ok = bool(rows) and (rows[0][1] is False) and (rows[1][1] is True)
+        # row for n=1 must have '' (not NULL); n=2 must be NULL. A round-trip
+        # that LOSES a row is itself a fidelity failure — report False, never
+        # crash with IndexError on rows[1].
+        fidelity_ok = (len(rows) >= 2 and (rows[0][1] is False)
+                       and (rows[1][1] is True))
         report["null_empty_fidelity"] = fidelity_ok
         tgt.execute("DROP TABLE IF EXISTS _a2h_smoke")
     finally:
