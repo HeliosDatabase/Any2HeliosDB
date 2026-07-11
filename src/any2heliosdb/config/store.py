@@ -11,7 +11,7 @@ from ..errors import ConfigError
 from ..sources.base import SourceAdapter
 from ..target.base import TargetDriver
 from ..typemap.registry import TypeRegistry
-from .model import Options, ProjectConfig, SourceConfig, TargetConfig
+from .model import CdcConfig, Options, ProjectConfig, SourceConfig, TargetConfig
 
 if sys.version_info >= (3, 11):  # pragma: no cover
     import tomllib as _toml_read
@@ -41,6 +41,7 @@ def to_toml_dict(cfg: ProjectConfig) -> Dict[str, Any]:
         "source": _clean(asdict(cfg.source)),
         "target": _clean(asdict(cfg.target)),
         "options": _clean(asdict(cfg.options)),
+        "cdc": _clean(asdict(cfg.cdc)),
         "data_type": dict(cfg.data_type),
         "modify_type": dict(cfg.modify_type),
         "capability": _clean(dict(cfg.capability)),
@@ -90,8 +91,16 @@ def load_config(path: str) -> ProjectConfig:
         drop_existing=bool(opt.get("drop_existing", True)),
         manifest_backend=str(opt.get("manifest_backend", "sqlite")).lower(),
     )
+    cdc_d = d.get("cdc", {})
+    cdc = CdcConfig(
+        capture_batch=int(cdc_d.get("capture_batch", 50_000)),
+        apply_batch=int(cdc_d.get("apply_batch", 10_000)),
+        poison_retries=int(cdc_d.get("poison_retries", 3)),
+        poison_max_per_run=int(cdc_d.get("poison_max_per_run", 25)),
+        trail_rotate_mb=int(cdc_d.get("trail_rotate_mb", 256)),
+    )
     return ProjectConfig(
-        source=source, target=target, options=options,
+        source=source, target=target, options=options, cdc=cdc,
         data_type=dict(d.get("data_type", {})), modify_type=dict(d.get("modify_type", {})),
         capability=dict(d.get("capability", {})),
     )

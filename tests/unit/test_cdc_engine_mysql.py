@@ -58,7 +58,7 @@ def _patch_capture(monkeypatch, capture_result):
         def __init__(self, *a, **k):
             pass
 
-        def capture(self, since):
+        def capture(self, since, limit=0):
             return capture_result
 
     monkeypatch.setattr(mysql_binlog, "MySqlBinlogSource", _FakeSource)

@@ -611,13 +611,28 @@ apply advance on independent, durable cursors. v1 capture is Oracle
 ### `a2h extract NAME`
 
 ```bash
-a2h extract NAME [-c config.toml]
+a2h extract NAME [-c config.toml] [--refresh-tables]
+a2h extract NAME --drop [--purge-trail]     # tear down
+a2h extract NAME --purge-applied            # reclaim applied trail segments
 ```
 
 **Purpose.** Capture source changes into the trail named `NAME`, then advance the
 capture cursor. `NAME` (a required positional argument) is the extract / capture
 process name — yours to choose; the first run **registers** it (capturing every
-table in the configured schema), and later runs refresh its table set.
+table in the configured schema). The registered table set is then **pinned**.
+
+| Option | Purpose |
+|---|---|
+| `--refresh-tables` | Adopt tables that appeared in the source since registration and **snapshot-load** their current rows into the trail (as INSERT records) before their CDC events flow. Without it, a new source table is reported (a warning each cycle) but not captured. PK-less new tables are reported and skipped. |
+| `--drop` | Tear the extract down: drop the PostgreSQL logical slot (so it stops pinning WAL) and remove the registry entry. Keeps the trail unless `--purge-trail`. |
+| `--purge-trail` | With `--drop`, also delete the trail directory (a clean slate). |
+| `--purge-applied` | Delete fully-applied **closed** trail segments (never the active one, never past the apply cursor) to reclaim disk. Manual — there is no automatic purge. |
+
+The tier-2 tunables that shape capture live in the [`[cdc]` config section](../guides/configuration.md#cdc-change-data-capture-tuning)
+(`capture_batch` caps events per cycle; `trail_rotate_mb` bounds segment size).
+See [Operational hardening](../cdc.md#operational-hardening-tier-2) for the full
+workflow. Over MCP, the `extract` tool takes `refresh_tables` / `drop` /
+`purge_trail` / `purge_applied` booleans.
 
 **Behavior by source dialect.**
 - **Oracle (SCN-watermark).** First cycle (watermark 0) is a **full snapshot**;
@@ -672,12 +687,21 @@ are skipped with a warning.
 | `--reconcile-deletes` / `--no-deletes` | **mode-aware**: on for the Oracle SCN source, off for the log-based sources (MySQL binlog, PostgreSQL logical) | Reconcile deletes via a source/target key-set diff: target rows whose PK is absent from the source's current key set are removed (a full O(keys) pass). The Oracle SCN source emits no delete events, so reconciliation defaults ON there; the log-based sources already carry explicit `D` records, so it defaults OFF (reconciling against the *live* source key set can also race a not-yet-applied PK-changing UPDATE and delete its old-key row ahead of the move). Passing either flag explicitly overrides the default for any source. |
 
 **Prints.** `replicat NAME: applied <n> change(s), deleted <d>, from <r> read;
-cursor=<c>`, plus warnings (e.g. PK-less tables skipped).
+cursor=<c>`, plus warnings (e.g. PK-less tables skipped). If any record was parked
+by the [poison policy](../cdc.md#poison-record-policy-poison_retries) it also
+prints `dead-lettered <n> poison record(s)`.
 
 ```
 $ a2h replicat cdc1 -c config.toml
 replicat cdc1: applied 2 change(s), deleted 0, from 2 read; cursor=10
 ```
+
+The apply reads and applies the trail in memory-bounded chunks
+([`apply_batch`](../guides/configuration.md#cdc-change-data-capture-tuning)); the
+keymove barrier composes, so the final state and cursor match an unbounded run. A
+record the target rejects `poison_retries` times is moved to `dead_letter.jsonl`
+beside the trail and the cursor advances past it (key-moves are never
+dead-lettered — they fail closed).
 
 **Prerequisites.** A registered extract (`a2h extract NAME` first, else
 `error: no such extract '<name>' …`), a reachable source (it supplies the
@@ -690,18 +714,24 @@ tool raises when the live probe detects a Nano target below the CDC-apply minimu
 ### `a2h extracts`
 
 ```bash
-a2h extracts [-c config.toml]
+a2h extracts [-c config.toml] [--lag]
 ```
 
 **Purpose.** List registered CDC extracts and their positions, read from the CDC
-registry (`<output_dir>/cdc.db`). Connects to nothing.
+registry (`<output_dir>/cdc.db`). Connects to nothing **unless** `--lag` is given.
+
+| Option | Purpose |
+|---|---|
+| `--lag` | Also compute each extract's replication lag by querying the source: PostgreSQL slot `confirmed_flush_lsn` vs `pg_current_wal_lsn()` (bytes of WAL still pinned), MySQL trailed binlog coordinate vs the server head, Oracle watermark SCN vs current SCN. Best-effort — an unreachable source prints `lag: unavailable`. |
 
 **Prints.** One line per extract — name, schema, table count, capture watermark,
-apply cursor, and state (`registered` → `capturing` → `applying`):
+apply cursor, state (`registered` → `capturing` → `applying`), and (when any are
+parked) `dead_letters=N`; with `--lag`, a second line per extract:
 
 ```
-$ a2h extracts -c config.toml
+$ a2h extracts -c config.toml --lag
   cdc1             schema=HR tables=2 watermark=2547990 cursor=10 state=applying
+      lag: mode=scn watermark_scn=2547990 current_scn=2548400 scn_behind=410
 ```
 
 Prints `no extracts registered` when the registry is empty.

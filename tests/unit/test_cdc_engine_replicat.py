@@ -181,7 +181,7 @@ def _run_with_reconcile_spy(tmp_path, monkeypatch, dialect, name, reconcile_arg)
     calls = []
     from any2heliosdb.cdc.replicat import Replicat
 
-    def _spy(self, adapter):
+    def _spy(self, adapter, chunk_size=0):
         calls.append(True)
         return 0, []
 
