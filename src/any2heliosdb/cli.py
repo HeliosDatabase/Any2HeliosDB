@@ -273,6 +273,7 @@ def test_(config: str = CONFIG_OPT) -> None:
     """TEST: object-inventory diff (source vs target)."""
     from .config.store import build_source_adapter, build_target_driver, load_config
     from .validate.structure import run_test
+    from .validate.util import effective_preserve_case
 
     cfg = load_config(config)
     src = build_source_adapter(cfg)
@@ -280,7 +281,8 @@ def test_(config: str = CONFIG_OPT) -> None:
     src.connect()
     tgt.connect()
     try:
-        res = run_test(src.introspect_schema(cfg.source.schema), tgt, cfg.options.preserve_case)
+        res = run_test(src.introspect_schema(cfg.source.schema), tgt,
+                       effective_preserve_case(cfg, tgt))
         _print_validation(res)
         raise typer.Exit(0 if res.passed else 1)
     finally:
@@ -288,22 +290,12 @@ def test_(config: str = CONFIG_OPT) -> None:
         tgt.close()
 
 
-def _effective_preserve_case(cfg, tgt) -> bool:
-    """Validators must render identifiers the way the migration created them. The
-    native (Oracle-wire) target keeps source-case names (the orchestrator uses
-    ``keep_source_case = preserve_case or oracle-dialect``), so a validator that
-    folded to lowercase would query a wrong-cased / missing relation and report
-    zero rows. Mirror that rule here.
-    """
-    return bool(getattr(cfg.options, "preserve_case", False)
-                or getattr(tgt, "dialect", "") == "oracle")
-
-
 @app.command(name="test-count")
 def test_count(config: str = CONFIG_OPT) -> None:
     """TEST_COUNT: row counts on both sides."""
     from .config.store import build_source_adapter, build_target_driver, load_config
     from .validate.counts import run_test_count
+    from .validate.util import effective_preserve_case
 
     cfg = load_config(config)
     src = build_source_adapter(cfg)
@@ -312,7 +304,7 @@ def test_count(config: str = CONFIG_OPT) -> None:
     tgt.connect()
     try:
         schema = src.introspect_schema(cfg.source.schema)
-        res = run_test_count(src, tgt, schema.tables, _effective_preserve_case(cfg, tgt))
+        res = run_test_count(src, tgt, schema.tables, effective_preserve_case(cfg, tgt))
         _print_validation(res)
         raise typer.Exit(0 if res.passed else 1)
     finally:
@@ -328,6 +320,7 @@ def test_data(
     """TEST_DATA: ordered, sampled row comparison + checksums."""
     from .config.store import build_source_adapter, build_target_driver, load_config
     from .validate.data import run_test_data
+    from .validate.util import effective_preserve_case
 
     cfg = load_config(config)
     src = build_source_adapter(cfg)
@@ -338,7 +331,7 @@ def test_data(
     try:
         for t in src.introspect_schema(cfg.source.schema).tables:
             res = run_test_data(src, tgt, t, sample_rows=sample,
-                                preserve_case=_effective_preserve_case(cfg, tgt))
+                                preserve_case=effective_preserve_case(cfg, tgt))
             _print_validation(res)
             failed = failed or not res.passed
         raise typer.Exit(1 if failed else 0)
@@ -352,6 +345,7 @@ def test_index(config: str = CONFIG_OPT) -> None:
     """TEST_INDEX: target-side FK-index sanity (catches a stale/unbackfilled FK index)."""
     from .config.store import build_source_adapter, build_target_driver, load_config
     from .validate.data import run_test_index
+    from .validate.util import effective_preserve_case
 
     cfg = load_config(config)
     src = build_source_adapter(cfg)
@@ -362,7 +356,7 @@ def test_index(config: str = CONFIG_OPT) -> None:
     try:
         # The source schema supplies the FK metadata; the probe runs on the target.
         for t in src.introspect_schema(cfg.source.schema).tables:
-            res = run_test_index(tgt, t, preserve_case=_effective_preserve_case(cfg, tgt))
+            res = run_test_index(tgt, t, preserve_case=effective_preserve_case(cfg, tgt))
             _print_validation(res)
             failed = failed or not res.passed
         raise typer.Exit(1 if failed else 0)
@@ -528,7 +522,8 @@ def resume(config: str = CONFIG_OPT) -> None:
             stats = run_migrate(
                 src, tgt, schema=cfg.source.schema, registry=build_type_registry(cfg),
                 drop_existing=False, preserve_case=cfg.options.preserve_case,
-                prefer_copy=cfg.options.prefer_copy, cfg=cfg, manifest_path=manifest_path,
+                batch_size=cfg.options.batch_size, prefer_copy=cfg.options.prefer_copy,
+                cfg=cfg, manifest_path=manifest_path,
                 run_id=run_id, parallelism=cfg.options.parallelism, do_schema=False,
             )
         except ResumeDriftError as e:
