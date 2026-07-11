@@ -25,7 +25,12 @@ run, so the ≤3% degradation bound stays cumulative across a work session.
   `--auth-mode trust`; override every protocol port off its default).
 - The gate metric is **select ops/sec** (the parse→plan→execute hot path).
   `insert_bulk` is recorded for reference only: it is a single 80-row transaction,
-  so its "ops/sec" is dominated by commit latency and is too noisy to gate on.
+  so its "ops/sec" is dominated by commit latency and is too noisy to gate on —
+  observed swinging 0.20×–1.11× on identical code purely with ambient host load.
+  **Team ruling 2026-07-11**: `--compare`'s exit code gates on `select` only
+  (`tools/bench_oltp.py --gate-phases`, default `select`); other phases print as
+  informational. Pass `--gate-phases all` to restore all-phase gating for
+  baselines where every phase is measured robustly.
 
 | Edition | Server build | select ops/s | p50 ms | p95 ms | insert_bulk rows/s | JSON |
 |---|---|---|---|---|---|---|
