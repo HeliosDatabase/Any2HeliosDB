@@ -66,3 +66,26 @@ def test_target_where_quotes_reserved_pk_column():
     assert Chunk(t, "orders:0", "order", 0, 10).target_where() == \
         '"order" >= 0 AND "order" < 10'
     assert Chunk(t, "orders:0", "id", 0, 10).target_where() == "id >= 0 AND id < 10"
+
+
+def test_from_recorded_replays_predicate_verbatim():
+    from any2heliosdb.chunking.pk_range import Chunk
+    t = _t()
+    # A chunk rebuilt from its recorded manifest row (predicate + string bounds)
+    # returns the STORED source WHERE byte-for-byte — even if the recorded string
+    # differs from what pk_col/lo/hi would render now — so a resume can never swap
+    # a recomputed live-bounds range for the one already partially loaded.
+    ch = Chunk.from_recorded(t, "EMP:1", '"ID" >= 26 AND "ID" < 51', "26", "51", "ID")
+    assert ch.source_where() == '"ID" >= 26 AND "ID" < 51'
+    # bounds parsed back to ints drive the target-side idempotent range DELETE
+    assert ch.lo == 26 and ch.hi == 51
+    assert ch.target_where() == "id >= 26 AND id < 51"
+
+
+def test_from_recorded_whole_table_chunk_has_null_predicate():
+    from any2heliosdb.chunking.pk_range import Chunk
+    # A recorded whole-table chunk stored NULL predicate/bounds; rebuild it as a
+    # whole-table chunk (no WHERE), not a range chunk.
+    ch = Chunk.from_recorded(_t(), "EMP:0", None, None, None, None)
+    assert ch.pk_col is None
+    assert ch.source_where() is None and ch.target_where() is None

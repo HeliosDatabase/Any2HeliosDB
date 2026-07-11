@@ -413,6 +413,18 @@ a2h resume [-c config.toml]
 Because chunks are idempotent (per-chunk range-DELETE + load in one transaction),
 resuming **never duplicates rows**.
 
+**Replays the recorded plan.** A resume **does not recompute** the chunk plan
+from the live source — it replays the chunk predicates the manifest recorded when
+the run was first planned, byte-for-byte. So if rows were inserted or deleted at
+the source's primary-key edges between the original run and the resume, the load
+still covers exactly the ranges it set out to cover (no silently skipped or
+double-loaded PK ranges). The plan is only (re)computed from the current source on
+a **fresh** `migrate` or when the plan-affecting config changed (which resets the
+run). A table that appears in the source only on resume is planned fresh and
+added; a table that was recorded but has since **vanished** from the source makes
+`resume` **fail closed** (`resume aborted: … table(s) … no longer in the source`)
+rather than silently drop its unloaded rows — fix the source or start a fresh run.
+
 **Prints.** `resumed: <rows> rows across <tables> tables`, plus warnings.
 
 ```
@@ -420,10 +432,11 @@ $ a2h resume -c config.toml
 resumed: 8 rows across 2 tables
 ```
 
-**Exit codes.** `0` on success; `1` (`error: no manifest to resume …`) if no
-manifest exists for this config. (Note: `resume` reports the resumed counts but
-does not itself re-raise on a still-failed chunk — re-run `a2h status` to confirm
-`all chunks loaded`.)
+**Exit codes.** `0` on success; `1` if no manifest exists for this config
+(`error: no manifest to resume …`), if a recorded table vanished from the source
+or the PK column changed mid-run (the fail-closed cases above), or if chunks are
+still failed after the resume. After a resume that exits `0` with warnings, run
+`a2h status` to confirm it reports `all chunks loaded`.
 
 ### `a2h monitor`
 

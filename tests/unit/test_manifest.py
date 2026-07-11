@@ -44,6 +44,35 @@ def test_watermark_roundtrip(tmp_path):
     man.close()
 
 
+def test_get_chunks_returns_recorded_plan_all_states(tmp_path):
+    man = _mk(tmp_path)
+    rid = "run1"
+    man.start_run(rid)
+    man.add_table(rid, "HR.EMP", "emp")
+    man.add_chunk(rid, "HR.EMP", "EMP:0", predicate='"ID" >= 1 AND "ID" < 26',
+                  lo="1", hi="26")
+    man.add_chunk(rid, "HR.EMP", "EMP:1", predicate='"ID" >= 26 AND "ID" < 51',
+                  lo="26", hi="51")
+    man.add_table(rid, "HR.LOG", "log")
+    man.add_chunk(rid, "HR.LOG", "LOG:0")  # whole-table chunk (NULL predicate/bounds)
+    # LOADED state must NOT affect what get_chunks returns — the recorded PLAN is
+    # replayed regardless of load progress.
+    man.set_chunk_state(rid, "HR.EMP", "EMP:0", M.LOADED, rows_loaded=25)
+
+    recorded = man.get_chunks(rid)
+    # deterministic order: table_fqn, chunk_id
+    assert [(r.table_fqn, r.chunk_id) for r in recorded] == [
+        ("HR.EMP", "EMP:0"), ("HR.EMP", "EMP:1"), ("HR.LOG", "LOG:0")]
+    emp0 = recorded[0]
+    assert emp0.predicate == '"ID" >= 1 AND "ID" < 26'
+    assert (emp0.bounds_lo, emp0.bounds_hi) == ("1", "26")
+    log0 = recorded[2]
+    assert log0.predicate is None and log0.bounds_lo is None and log0.bounds_hi is None
+    # per-table filter
+    assert [r.chunk_id for r in man.get_chunks(rid, "HR.EMP")] == ["EMP:0", "EMP:1"]
+    man.close()
+
+
 def test_reset_run_clears_loaded_chunks_for_drop_existing_reload(tmp_path):
     man = _mk(tmp_path)
     rid = "run1"
