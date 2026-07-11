@@ -173,7 +173,17 @@ class MySqlBinlogSource:
         finally:
             c.close()
 
-    def capture(self, position: str) -> Tuple[List[ChangeRecord], str]:
+    def capture(self, position: str, limit: int = 0) -> Tuple[List[ChangeRecord], str]:
+        """Read binlog change events from *position*; return records + the new
+        coordinate.
+
+        ``limit`` (tier-2 ``capture_batch``) bounds resident memory after a long
+        outage: capture stops at the first event boundary once at least ``limit``
+        change records have accumulated (``0`` = no cap — read until the stream
+        drains, the pre-tier-2 behaviour). Because the returned coordinate is the
+        stream position after the last processed event, the next cycle resumes
+        exactly where this one stopped — cursor semantics are unchanged.
+        """
         if not position:
             # First cycle: anchor at the current position, capture nothing yet.
             return [], self.current_position()
@@ -192,6 +202,7 @@ class MySqlBinlogSource:
             only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent],
             log_file=log_file, log_pos=int(log_pos), resume_stream=True, blocking=False)
         records: List[ChangeRecord] = []
+        cap = int(limit) if limit and int(limit) > 0 else 0
         try:
             for ev in stream:
                 tbl = ev.table
@@ -252,7 +263,37 @@ class MySqlBinlogSource:
                         records.append(ChangeRecord(op=DELETE, schema=self.schema, table=tbl,
                                                     key={k: vals.get(k) for k in pk}, after={},
                                                     source_pos=pos))
+                # Bound resident memory: stop at this event boundary once the cap is
+                # reached. The coordinate below is this event's END, so the next
+                # cycle resumes exactly after it (no event is split or lost).
+                if cap and len(records) >= cap:
+                    break
             new_pos = "{}:{}".format(stream.log_file, stream.log_pos)
         finally:
             stream.close()
         return records, new_pos
+
+    def master_position(self) -> str:
+        """Current binlog coordinate ``<file>:<pos>`` WITHOUT the anchor-time side
+        effects of :meth:`current_position` (no ``SET GLOBAL`` / row-image checks).
+
+        Used only for lag reporting (``a2h extracts --lag``), where a read-only
+        peek at the source's head position is all that is needed.
+        """
+        import pymysql
+
+        c = pymysql.connect(**{k: v for k, v in self._conn_settings().items() if k != "passwd"},
+                            password=self.dsn.password or "")
+        try:
+            cur = c.cursor()
+            for q in ("SHOW BINARY LOG STATUS", "SHOW MASTER STATUS"):  # 8.4 renamed it
+                try:
+                    cur.execute(q)
+                    row = cur.fetchone()
+                    if row:
+                        return "{}:{}".format(row[0], row[1])
+                except Exception:  # noqa: BLE001
+                    continue
+            return ""
+        finally:
+            c.close()

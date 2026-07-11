@@ -374,13 +374,49 @@ def report(config: str = CONFIG_OPT, output: Optional[str] = typer.Option(None, 
 # --- CDC (M5 spine) ----------------------------------------------------------
 @app.command()
 def extract(name: str = typer.Argument(..., help="Extract (capture process) name."),
-            config: str = CONFIG_OPT) -> None:
-    """Capture source changes into the named trail (v1 SCN-watermark)."""
-    from .cdc.engine import run_extract
+            config: str = CONFIG_OPT,
+            refresh_tables: bool = typer.Option(
+                False, "--refresh-tables",
+                help="Adopt tables that appeared in the source since registration and "
+                     "snapshot-load their current rows into the trail before their CDC "
+                     "events apply. Without this, new tables are only reported (a warning "
+                     "each cycle), never captured."),
+            drop: bool = typer.Option(
+                False, "--drop",
+                help="Tear the extract down: drop the PG logical slot (so it stops "
+                     "pinning WAL) and remove the registry entry. Keeps the trail unless "
+                     "--purge-trail is also given."),
+            purge_trail: bool = typer.Option(
+                False, "--purge-trail",
+                help="With --drop, also delete the trail directory (a clean slate)."),
+            purge_applied: bool = typer.Option(
+                False, "--purge-applied",
+                help="Delete fully-applied closed trail segments (never the active one, "
+                     "never past the apply cursor) to reclaim disk.")) -> None:
+    """Capture source changes into the named trail, or manage its lifecycle.
+
+    Plain form captures; --refresh-tables adopts/snapshots new source tables;
+    --drop tears the extract down; --purge-applied reclaims applied trail segments.
+    """
+    from .cdc.engine import drop_extract, purge_applied_segments, run_extract
     from .config.store import load_config
 
     cfg = load_config(config)
-    r = run_extract(cfg, name)
+    if drop:
+        r = drop_extract(cfg, name, purge_trail=purge_trail)
+        console.print(
+            "[green]extract {}[/green]: dropped (registry removed={}, slot dropped={}, "
+            "trail purged={})".format(name, r["removed"], r["dropped_slot"], r["purged_trail"]))
+        return
+    if purge_applied:
+        r = purge_applied_segments(cfg, name)
+        console.print(
+            "[green]extract {}[/green]: purged {} applied segment(s) at cursor {}".format(
+                name, r["purged_segments"], r["cursor"]))
+        for p in cast("list", r["purged_paths"]):
+            console.print("  [dim]removed {}[/dim]".format(p))
+        return
+    r = run_extract(cfg, name, refresh_tables=refresh_tables)
     if r.get("mode") == "binlog":
         label = "binlog since {}".format(r["since"])
     elif r["since"] == 0:
@@ -389,6 +425,14 @@ def extract(name: str = typer.Argument(..., help="Extract (capture process) name
         label = "incremental since SCN {}".format(r["since"])
     console.print("[green]extract {}[/green]: captured {} change(s) ({}); watermark={}".format(
         name, r["captured"], label, r["watermark"]))
+    snapped = int(cast("int", r.get("snapshotted", 0)) or 0)
+    if snapped:
+        console.print("  [green]snapshot-loaded {} row(s) from newly-adopted table(s)[/green]".format(
+            snapped))
+    for t in cast("list", r.get("new_tables", []) or []):
+        console.print(
+            "  [yellow]new table {} present in the source but NOT captured — run "
+            "`a2h extract {} --refresh-tables` to snapshot + adopt it[/yellow]".format(t, name))
     for s in cast("list", r["skipped"]):
         console.print("  [yellow]skipped {} (no primary key)[/yellow]".format(s))
 
@@ -411,23 +455,43 @@ def replicat(name: str = typer.Argument(..., help="Replicat (apply process) name
     r = run_replicat(cfg, name, reconcile_deletes=reconcile_deletes)
     console.print("[green]replicat {}[/green]: applied {} change(s), deleted {}, from {} read; cursor={}".format(
         name, r["applied"], r["deleted"], r["read"], r["cursor"]))
+    dl = int(cast("int", r.get("dead_lettered", 0)) or 0)
+    if dl:
+        console.print(
+            "  [red]dead-lettered {} poison record(s)[/red] (total parked: {}) — see "
+            "dead_letter.jsonl in the trail dir".format(dl, r.get("dead_letter_total", dl)))
     for w in cast("list", r["warnings"]):
         console.print("  [yellow]warn:[/yellow] {}".format(w))
 
 
 @app.command()
-def extracts(config: str = CONFIG_OPT) -> None:
+def extracts(config: str = CONFIG_OPT,
+             lag: bool = typer.Option(
+                 False, "--lag",
+                 help="Also compute each extract's replication lag by querying the "
+                      "source (PG slot vs current WAL LSN, MySQL binlog head, Oracle "
+                      "SCN). Off by default so listing needs no source connection.")) -> None:
     """List registered CDC extracts and their capture/apply positions."""
-    from .cdc.engine import list_extracts
+    from .cdc.engine import dead_letter_count, extract_lag, list_extracts
     from .config.store import load_config
 
-    rows = list_extracts(load_config(config))
+    cfg = load_config(config)
+    rows = list_extracts(cfg)
     if not rows:
         console.print("no extracts registered")
         return
     for e in rows:
-        console.print("  {:16} schema={} tables={} watermark={} cursor={} state={}".format(
-            e.name, e.schema, len(e.tables), e.watermark, e.apply_cursor, e.state))
+        dl = dead_letter_count(cfg, e.name)
+        dl_txt = " dead_letters={}".format(dl) if dl else ""
+        console.print("  {:16} schema={} tables={} watermark={} cursor={} state={}{}".format(
+            e.name, e.schema, len(e.tables), e.watermark, e.apply_cursor, e.state, dl_txt))
+        if lag:
+            info = extract_lag(cfg, e)
+            if info is None:
+                console.print("      [dim]lag: unavailable (source unreachable)[/dim]")
+            else:
+                console.print("      [cyan]lag:[/cyan] {}".format(
+                    " ".join("{}={}".format(k, v) for k, v in info.items())))
 
 
 @app.command()

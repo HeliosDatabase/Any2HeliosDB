@@ -124,6 +124,10 @@ class NativeOracleDriver(TargetDriver):
             cur.execute(sql, list(params) if params else [])
             return list(cur.fetchall())
 
+    def ping(self) -> None:
+        """Liveness probe for the CDC poison-vs-outage decision (Oracle needs DUAL)."""
+        self.query("SELECT 1 FROM DUAL")
+
     def describe_columns(self, target_table: str) -> List[str]:
         with self.conn.cursor() as cur:
             cur.execute("SELECT * FROM {} WHERE ROWNUM < 1".format(_oq(target_table)))

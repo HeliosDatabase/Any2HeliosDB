@@ -69,6 +69,8 @@ _CONFIG_PROP: Dict[str, Dict[str, Any]] = {
     "source": {"type": "object", "description": "Inline [source] config block."},
     "target": {"type": "object", "description": "Inline [target] config block."},
     "options": {"type": "object", "description": "Inline [options] config block."},
+    "cdc": {"type": "object", "description": "Inline [cdc] tuning block (capture_batch, "
+            "apply_batch, poison_retries, poison_max_per_run, trail_rotate_mb)."},
     "data_type": {"type": "object", "description": "Ora2Pg-style DATA_TYPE overrides."},
     "modify_type": {"type": "object", "description": "Ora2Pg-style MODIFY_TYPE overrides."},
 }
@@ -83,7 +85,7 @@ def _load_cfg(args: Dict[str, Any]):
         return load_config(str(path))
 
     inline: Dict[str, Any] = {}
-    for key in ("source", "target", "options", "data_type", "modify_type", "capability"):
+    for key in ("source", "target", "options", "cdc", "data_type", "modify_type", "capability"):
         if isinstance(args.get(key), dict):
             inline[key] = args[key]
     if not inline:
@@ -235,18 +237,22 @@ def _h_status(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _h_extracts(args: Dict[str, Any]) -> Dict[str, Any]:
-    from ..cdc.engine import list_extracts
+    from ..cdc.engine import dead_letter_count, extract_lag, list_extracts
 
     cfg = _load_cfg(args)
+    want_lag = bool(args.get("lag"))
     rows = list_extracts(cfg)
-    return {
-        "ok": True,
-        "extracts": [
-            {"name": e.name, "schema": e.schema, "tables": len(e.tables),
-             "watermark": e.watermark, "apply_cursor": e.apply_cursor, "state": e.state}
-            for e in rows
-        ],
-    }
+    out = []
+    for e in rows:
+        entry: Dict[str, Any] = {
+            "name": e.name, "schema": e.schema, "tables": len(e.tables),
+            "watermark": e.watermark, "apply_cursor": e.apply_cursor, "state": e.state,
+            "dead_letters": dead_letter_count(cfg, e.name),
+        }
+        if want_lag:
+            entry["lag"] = extract_lag(cfg, e)  # None when the source is unreachable
+        out.append(entry)
+    return {"ok": True, "extracts": out}
 
 
 def _h_list_config(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -410,13 +416,23 @@ def _h_resume(args: Dict[str, Any]) -> Dict[str, Any]:
 
 # Admin (CDC capture/apply + config write) ------------------------------------
 def _h_extract(args: Dict[str, Any]) -> Dict[str, Any]:
-    from ..cdc.engine import run_extract
+    from ..cdc.engine import drop_extract, purge_applied_segments, run_extract
 
     cfg = _load_cfg(args)
     name = args.get("name")
     if not name:
         raise Any2HeliosError("extract requires a 'name'")
-    r = run_extract(cfg, str(name))
+    name = str(name)
+    # Lifecycle verbs mirror the CLI's --drop / --purge-applied / --refresh-tables.
+    if args.get("drop"):
+        r = drop_extract(cfg, name, purge_trail=bool(args.get("purge_trail")))
+        r["ok"] = True
+        return r
+    if args.get("purge_applied"):
+        r = purge_applied_segments(cfg, name)
+        r["ok"] = True
+        return r
+    r = run_extract(cfg, name, refresh_tables=bool(args.get("refresh_tables")))
     r["ok"] = True
     return r
 
@@ -481,9 +497,16 @@ def build_catalog() -> "ToolRegistry":
     reg.add(Tool("status", Role.VIEWER,
                  "Progress of the current/last migration run from the manifest.",
                  _h_status, properties=dict(cfg_props)))
+    extracts_props = dict(cfg_props)
+    extracts_props["lag"] = {
+        "type": "boolean",
+        "description": ("Also compute each extract's replication lag by querying the source "
+                        "(PG slot vs current WAL LSN, MySQL binlog head, Oracle SCN). Off by "
+                        "default so the listing needs no source connection.")}
     reg.add(Tool("extracts", Role.VIEWER,
-                 "List registered CDC extracts and their capture/apply positions.",
-                 _h_extracts, properties=dict(cfg_props)))
+                 "List registered CDC extracts, their capture/apply positions, dead-letter "
+                 "counts, and (optionally) replication lag.",
+                 _h_extracts, properties=extracts_props))
     reg.add(Tool("test", Role.VIEWER,
                  "TEST: object-inventory diff (source vs target).",
                  _h_test, properties=dict(cfg_props)))
@@ -522,9 +545,27 @@ def build_catalog() -> "ToolRegistry":
     # admin (+ CDC capture/apply + config write)
     name_props = dict(cfg_props)
     name_props["name"] = {"type": "string", "description": "Extract/replicat process name."}
+    extract_props = dict(name_props)
+    extract_props["refresh_tables"] = {
+        "type": "boolean",
+        "description": ("Adopt tables that appeared in the source since registration and "
+                        "snapshot-load their current rows into the trail before their CDC "
+                        "events apply. Without this, new tables are only reported, not captured.")}
+    extract_props["drop"] = {
+        "type": "boolean",
+        "description": ("Tear the extract down: drop the PG logical slot (stops pinning WAL) "
+                        "and remove the registry entry. Keeps the trail unless purge_trail.")}
+    extract_props["purge_trail"] = {
+        "type": "boolean",
+        "description": "With drop, also delete the trail directory (a clean slate)."}
+    extract_props["purge_applied"] = {
+        "type": "boolean",
+        "description": ("Delete fully-applied closed trail segments (never the active one, "
+                        "never past the apply cursor) to reclaim disk.")}
     reg.add(Tool("extract", Role.ADMIN,
-                 "Capture source changes into the named CDC trail.",
-                 _h_extract, properties=name_props, required=["name"]))
+                 "Capture source changes into the named CDC trail, or manage its lifecycle "
+                 "(refresh_tables / drop / purge_applied).",
+                 _h_extract, properties=extract_props, required=["name"]))
     rep_props = dict(name_props)
     rep_props["reconcile_deletes"] = {
         "type": "boolean",

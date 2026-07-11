@@ -42,6 +42,7 @@ from __future__ import annotations
 from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ..core.change_record import DELETE, ChangeRecord
+from ..errors import Any2HeliosError
 
 
 def _classify(r: ChangeRecord, pk: Sequence[str], cols: Sequence[str]) -> str:
@@ -116,6 +117,8 @@ class Replicat:
         self,
         records: List[ChangeRecord],
         on_flush: Optional[Callable[[int], None]] = None,
+        poison_retries: int = 0,
+        on_poison: Optional[Callable[[ChangeRecord, str, int], bool]] = None,
     ) -> Tuple[int, List[str]]:
         """Apply *records* with a durability barrier isolating every keymove.
 
@@ -133,8 +136,26 @@ class Replicat:
         with no keymove flushes exactly once at the end — today's per-slice
         behaviour, byte-identical.
 
+        **Poison policy (tier-2).** When ``poison_retries > 0`` and ``on_poison``
+        is supplied, a non-keymove batch that fails to apply is re-tried
+        record-by-record; a single record that fails ``poison_retries`` times is
+        passed to ``on_poison(record, reason, offset)`` (which dead-letters it and
+        returns whether it was newly recorded) and the apply then advances PAST it,
+        so one poison record can never wedge the cursor forever. ``offset`` is the
+        record's line index within this call (1-based), letting the caller record
+        the failing record's trail cursor. Before parking a record the target is
+        ``ping()``ed: if it is unreachable the failure is a transient OUTAGE, not
+        poison, so this **raises** (cursor unmoved, next run retries) rather than
+        dead-lettering a healthy record on a sick target — a dead target must never
+        dead-letter the whole backlog. ``consumed`` still counts a genuinely-parked
+        record (the cursor moves past a dead-lettered record). **Keymoves are never
+        dead-lettered** — a keymove that fails still raises (fail closed), because
+        skipping it would diverge key state. With the defaults (``poison_retries``
+        0 / no callback) a failing record raises exactly as before.
+
         Returns the same ``(applied, warnings)`` pair as :meth:`apply`.
         """
+        poison_on = poison_retries > 0 and on_poison is not None
         total_applied = 0
         warnings: List[str] = []
         consumed = 0
@@ -144,7 +165,15 @@ class Replicat:
             nonlocal total_applied, consumed
             if not batch:
                 return
-            a, w = self.apply(batch)
+            if poison_on:
+                try:
+                    a, w = self.apply(batch)
+                except Exception:  # noqa: BLE001 - isolate the poison record(s)
+                    a, w = self._apply_isolating_poison(
+                        list(batch), poison_retries, on_poison,  # type: ignore[arg-type]
+                        consumed)
+            else:
+                a, w = self.apply(batch)
             total_applied += a
             warnings.extend(w)
             consumed += len(batch)
@@ -155,7 +184,7 @@ class Replicat:
         for r in records:
             if self._is_keymove(r):
                 flush_batch()  # persist the cursor up to (but not incl.) the keymove
-                a, w = self.apply([r])
+                a, w = self.apply([r])  # keymove: fail closed on error (never dead-letter)
                 total_applied += a
                 warnings.extend(w)
                 consumed += 1
@@ -165,6 +194,72 @@ class Replicat:
                 batch.append(r)
         flush_batch()
         return total_applied, warnings
+
+    def _apply_isolating_poison(
+        self,
+        batch: List[ChangeRecord],
+        poison_retries: int,
+        on_poison: Callable[[ChangeRecord, str, int], bool],
+        base_consumed: int = 0,
+    ) -> Tuple[int, List[str]]:
+        """Re-apply a failed non-keymove batch one record at a time, dead-lettering
+        any record that fails ``poison_retries`` times so the cursor can advance.
+
+        The batch never contains a keymove (the barrier isolates those), so every
+        record here is safe to skip after exhausting retries. Order within the
+        batch is preserved (records applied in arrival order), matching the batched
+        path's semantics. ``base_consumed`` is how many records this chunk consumed
+        before the batch, so record *j* reports offset ``base_consumed + j + 1``.
+
+        A record that exhausts its retries is only dead-lettered once the target
+        answers a ``ping()`` — if the ping fails the whole batch was failing because
+        the TARGET is down (a transient outage), not because the record is poison,
+        so this raises (cursor unmoved) rather than parking a healthy record. That is
+        what stops a dead target from dead-lettering the entire backlog.
+        """
+        applied = 0
+        warnings: List[str] = []
+        attempts = max(1, poison_retries)
+        for j, r in enumerate(batch):
+            ok: Optional[int] = None
+            last_err: Optional[BaseException] = None
+            for _ in range(attempts):
+                try:
+                    a, w = self.apply([r])
+                    ok = a
+                    warnings.extend(w)
+                    break
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+            if ok is not None:
+                applied += ok
+                continue
+            # The record exhausted its retries. Distinguish poison from a sick
+            # target: ping before parking. A failing ping means the target is
+            # unreachable, so re-raise (cursor stays; the next run retries the
+            # whole chunk) instead of dead-lettering a record a healthy target
+            # would accept.
+            try:
+                self.target.ping()
+            except Exception as pe:  # noqa: BLE001
+                raise Any2HeliosError(
+                    "CDC replicat: target became unreachable while isolating a failed "
+                    "record ({}.{} key={}); treating this as a transient outage, not "
+                    "poison — leaving the apply cursor unmoved so the next run retries "
+                    "rather than dead-lettering the backlog against a dead target. "
+                    "Underlying apply error: {}".format(
+                        r.schema, r.table, r.key, last_err)) from pe
+            reason = "{}: {}".format(type(last_err).__name__, last_err)
+            newly = on_poison(r, reason, base_consumed + j + 1)
+            if newly:
+                warnings.append(
+                    "dead-lettered {}.{} key={} after {} attempt(s): {}".format(
+                        r.schema, r.table, r.key, attempts, last_err))
+            else:
+                warnings.append(
+                    "skipped already-dead-lettered {}.{} key={}".format(
+                        r.schema, r.table, r.key))
+        return applied, warnings
 
     def apply(self, records: List[ChangeRecord]) -> Tuple[int, List[str]]:
         buckets: Dict[str, List[ChangeRecord]] = {}
@@ -328,13 +423,23 @@ class Replicat:
             applied += 1
         return applied
 
-    def reconcile_deletes(self, source_adapter) -> Tuple[int, List[str]]:
+    def reconcile_deletes(self, source_adapter, chunk_size: int = 0) -> Tuple[int, List[str]]:
         """Delete target rows whose PK is absent from the source's current keys.
 
         v1 SCN-watermark capture cannot observe DELETEs (the rows are already
-        gone), so the replicat reconciles them with a full key-set diff: keys on
-        the target but not in the source are removed. This is a full pass
-        (cost O(keys)); incremental delete capture is the log-based roadmap.
+        gone), so the replicat reconciles them with a key-set diff: keys on the
+        target but not in the source are removed.
+
+        **Bounded (tier-2).** Rather than materialize BOTH full key-sets and their
+        difference, this streams the target keys and deletes surplus keys in
+        batches of ``chunk_size`` (``0`` = one final batch, the pre-tier-2
+        behaviour), so the surplus/delete buffer never grows without bound. *One*
+        side — the **source** key-set — is still held in memory to test membership
+        (a chunked set-diff; a true sorted-merge would need both sides to emit
+        ordered keys, which the drivers do not guarantee). That is the documented
+        memory note: peak reconcile memory is O(source keys) per table, not
+        O(source + target). Cost is still a full pass; incremental delete capture
+        is the log-based roadmap.
         """
         deleted = 0
         warnings: List[str] = []
@@ -346,10 +451,16 @@ class Replicat:
                 src_keys = {tuple(r) for r in source_adapter.stream_rows(t, pk)}
                 target_table = t.target_name(self.preserve_case)
                 key_idents = [self._ident(c) for c in pk]
-                tgt_keys = {tuple(r) for r in self.target.select_keys(target_table, key_idents)}
-                extra = [list(k) for k in (tgt_keys - src_keys)]
-                if extra:
-                    deleted += self.target.delete_keys(target_table, key_idents, extra)
+                surplus: List[List[object]] = []
+                for k in self.target.select_keys(target_table, key_idents):
+                    tk = tuple(k)
+                    if tk not in src_keys:
+                        surplus.append(list(tk))
+                        if chunk_size and len(surplus) >= chunk_size:
+                            deleted += self.target.delete_keys(target_table, key_idents, surplus)
+                            surplus = []
+                if surplus:
+                    deleted += self.target.delete_keys(target_table, key_idents, surplus)
             except Exception as e:  # noqa: BLE001
                 warnings.append("delete reconcile {}: {}".format(t.name, e))
         return deleted, warnings

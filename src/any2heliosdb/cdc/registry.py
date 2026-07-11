@@ -11,6 +11,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import List, Optional
 
+from ..errors import Any2HeliosError
+
 
 @dataclass
 class Extract:
@@ -20,6 +22,21 @@ class Extract:
     watermark: int
     apply_cursor: int
     state: str
+
+
+def _reject_comma_table_names(tables: List[str]) -> None:
+    """Refuse to persist a table name containing a comma. The registry stores the
+    captured table set as a single comma-separated ``tables_csv`` column; a name
+    with a comma would be split on load and silently drop that table from capture,
+    so fail closed (this is cheaper than migrating the storage format, and a comma
+    in a real table name is exotic)."""
+    bad = [t for t in tables if "," in t]
+    if bad:
+        raise Any2HeliosError(
+            "CDC registry: cannot register/adopt table name(s) {} — a comma collides "
+            "with the registry's comma-separated tables_csv storage and would silently "
+            "split the name, excluding the table from capture. Rename the table(s) or "
+            "exclude them from the extract's schema.".format(bad))
 
 
 class CdcRegistry:
@@ -38,14 +55,43 @@ class CdcRegistry:
         )
         self._db.commit()
 
-    def register(self, name: str, schema: str, tables: List[str]) -> None:
-        """Create the extract if absent; refresh its table set if it exists."""
-        self._db.execute(
-            "INSERT INTO extracts (name, schema, tables_csv) VALUES (?,?,?) "
-            "ON CONFLICT(name) DO UPDATE SET schema=excluded.schema, tables_csv=excluded.tables_csv",
-            (name, schema, ",".join(tables)),
-        )
+    def register(self, name: str, schema: str, tables: List[str],
+                 adopt_tables: bool = True) -> None:
+        """Create the extract if absent; update it if it exists.
+
+        ``adopt_tables`` controls what happens to the registered table set on an
+        EXISTING extract (tier-2 H2). With ``True`` (first registration, or an
+        explicit ``a2h extract NAME --refresh-tables``) the pinned table set is
+        replaced with *tables*. With ``False`` (a routine cycle) the table set is
+        left **pinned** — the schema is still refreshed, but a table that appeared
+        in the source after registration is NOT silently absorbed; the engine
+        detects it, warns each cycle, and only adopts + snapshot-loads it on an
+        explicit ``--refresh-tables``. A brand-new extract always adopts (there is
+        nothing pinned yet)."""
+        existing = self.get(name)
+        if existing is None:
+            _reject_comma_table_names(tables)
+            self._db.execute(
+                "INSERT INTO extracts (name, schema, tables_csv) VALUES (?,?,?)",
+                (name, schema, ",".join(tables)),
+            )
+        elif adopt_tables:
+            _reject_comma_table_names(tables)
+            self._db.execute(
+                "UPDATE extracts SET schema=?, tables_csv=? WHERE name=?",
+                (schema, ",".join(tables), name),
+            )
+        else:
+            self._db.execute("UPDATE extracts SET schema=? WHERE name=?", (schema, name))
         self._db.commit()
+
+    def remove(self, name: str) -> bool:
+        """Delete the extract's registry row (``a2h extract NAME --drop``). Returns
+        ``True`` if a row existed. The trail and dead-letter files are separate
+        (the caller removes them only on ``--purge-trail``)."""
+        cur = self._db.execute("DELETE FROM extracts WHERE name=?", (name,))
+        self._db.commit()
+        return cur.rowcount > 0
 
     def get(self, name: str) -> Optional[Extract]:
         row = self._db.execute(

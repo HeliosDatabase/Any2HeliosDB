@@ -108,6 +108,10 @@ class PsycopgDriver(TargetDriver):
             cur.execute(sql, params)
             return list(cur.fetchall())
 
+    def ping(self) -> None:
+        """Liveness probe for the CDC poison-vs-outage decision (SELECT 1)."""
+        self.query("SELECT 1")
+
     @staticmethod
     def _exec_each(cur, stmt: str, param_sets) -> int:
         """Run ``stmt`` once per parameter set with single ``execute`` calls.

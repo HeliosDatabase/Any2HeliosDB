@@ -43,11 +43,19 @@ run extract and replicat on different schedules or hosts (sharing the trail).
 | Command | Purpose |
 |---|---|
 | `a2h extract NAME -c config.toml` | Capture source changes into the `NAME` trail; advance the watermark. |
+| `a2h extract NAME --refresh-tables` | Adopt tables that appeared in the source since registration and snapshot-load their current rows (see [New tables](#new-tables-after-registration)). |
+| `a2h extract NAME --drop [--purge-trail]` | Tear the extract down: drop the PG logical slot + remove the registry entry (and, with `--purge-trail`, the trail dir). See [Slot lifecycle](#slot-lifecycle--lag). |
+| `a2h extract NAME --purge-applied` | Delete fully-applied closed trail segments to reclaim disk (see [Trail rotation](#trail-rotation--retention)). |
 | `a2h replicat NAME -c config.toml` | Apply the `NAME` trail to the target (idempotent); advance the apply cursor. |
-| `a2h extracts -c config.toml` | List extracts with schema, table count, watermark, cursor, and state. |
+| `a2h extracts -c config.toml [--lag]` | List extracts with schema, table count, watermark, cursor, state, dead-letter count, and (with `--lag`) replication lag. |
 
 `NAME` is yours to choose; the first `extract` registers it (capturing every table
-in the configured schema) and subsequent runs refresh its table set.
+in the configured schema). The registered table set is then **pinned** — see
+[New tables after registration](#new-tables-after-registration).
+
+Over MCP the same surface is available: the `extract` tool takes `refresh_tables`
+/ `drop` / `purge_trail` / `purge_applied` booleans, and the `extracts` tool takes
+a `lag` boolean and reports each extract's `dead_letters` count.
 
 ### Example cycle
 
@@ -437,6 +445,140 @@ and your workload re-keys parent rows, either run the apply inside a window with
 `DEFERRABLE INITIALLY DEFERRED`) or drop/disable the FK for the CDC window
 (the `--no-fk` load posture) and re-validate afterwards. Targets that do not
 enforce FKs (e.g. HeliosDB-Lite in parse-only mode) are unaffected.
+
+## Operational hardening (tier 2)
+
+These make a long-running CDC pipeline safe to leave unattended — bounded memory,
+new-table visibility, slot cleanup, poison isolation, and trail retention. Every
+knob is a `[cdc]` config key ([configuration.md](guides/configuration.md#cdc-change-data-capture-tuning));
+each operator action is a CLI flag with MCP parity.
+
+### Bounded memory (`capture_batch` / `apply_batch`)
+
+Capture and apply used to materialize their whole working set: a log-based
+`extract` peeked *all* pending changes (gigabytes after an outage), and `replicat`
+read the entire trail slice into memory. Both are now chunked:
+
+- **`capture_batch`** (default 50 000) caps how many change events one `extract`
+  cycle pulls — `pg_logical_slot_peek_changes`'s `upto_nchanges` for PostgreSQL, a
+  binlog event-boundary stop for MySQL. The server-side cursor (slot LSN / binlog
+  pos) is only advanced past what was captured, so the remainder is picked up next
+  cycle — **cursor semantics are unchanged**. `0` restores the unbounded behaviour.
+  (The Oracle SCN-watermark scan is a single consistent snapshot and is not capped;
+  its apply side is bounded below.) **Limitation:** for PostgreSQL the cap is
+  checked at **transaction boundaries** (decoding stops once ≥ `capture_batch`
+  changes have been emitted *and* the current transaction ends), so it bounds the
+  backlog of *committed transactions* after an outage — never a single transaction.
+  One huge transaction is still materialized whole; keep source transactions
+  bounded if that matters.
+- **`apply_batch`** (default 10 000) makes `replicat` read + apply the trail in
+  bounded line-chunks, persisting the exact apply cursor after each chunk. **The
+  keymove barrier composes**: within every chunk each key-move is still flushed
+  alone, so a crash can only ever replay a key-move by itself — a bounded, batched
+  apply reaches the identical final state and cursor as an unbounded one. The same
+  value bounds the surplus-key delete batch in [delete reconciliation](#delete-reconciliation-mode-aware-default),
+  whose diff now streams the target keys and holds only the **source** key-set in
+  memory (a chunked set-diff; peak O(source keys) per table, not O(source+target)).
+
+### New tables after registration
+
+The registered table set is **pinned** at first `extract`. A table that appears
+in the source *later* is **not silently absorbed** — that would either miss its
+pre-existing rows (a snapshot gap) or race its first events. Instead every cycle
+**warns** that the table is present but not captured:
+
+```
+new table ORDERS present in the source but NOT captured — run
+`a2h extract cdc1 --refresh-tables` to snapshot + adopt it
+```
+
+`a2h extract NAME --refresh-tables` (MCP: `refresh_tables: true`) then
+**snapshot-loads** the new tables' current rows into the trail (as INSERT records,
+so they flow through the same idempotent apply) **and adopts** them, so their CDC
+events are captured from the next cycle on — snapshot first, then live changes, in
+that order. PK-less new tables are reported and skipped (they can't be keyed).
+Full continuous auto-snapshot is a v2 item; this is the safe, explicit minimum.
+
+### Slot lifecycle & lag
+
+A PostgreSQL logical slot **pins WAL** until it is dropped — an abandoned extract
+will fill the source disk. `a2h extract NAME --drop` (MCP: `drop: true`) drops the
+slot and removes the registry entry; add `--purge-trail` to also delete the trail
+directory. Dropping keeps the trail by default (the apply cursor lives in the
+registry, so a re-registered extract re-derives it). If the slot drop **fails**
+(e.g. the slot is still `active` on another connection) `--drop` **raises and keeps
+the registry entry** — a WAL-pinning slot never silently vanishes from `a2h
+extracts` while the command claims success. An already-absent slot is not an error
+(it reports `dropped_slot=false` and removes the entry cleanly).
+
+`a2h extracts --lag` (MCP: `lag: true`) reports how far behind each extract is —
+for PostgreSQL the slot's `confirmed_flush_lsn` vs `pg_current_wal_lsn()` (bytes of
+WAL still pinned), for MySQL the trailed binlog coordinate vs the server head
+reported as **`files_behind` + `bytes_behind`** (byte offsets only compare within
+one binlog file, so across a rollover `bytes_behind` is the head's offset within its
+own file and `files_behind` counts the whole files in between — never a raw encoded
+delta), for Oracle the watermark SCN vs the current SCN. Lag is **advisory and best-effort**:
+it queries the source, and an unreachable source yields "unavailable" rather than
+failing the listing (so plain `a2h extracts` needs no source connection).
+
+### Poison-record policy (`poison_retries` / `poison_max_per_run`)
+
+One record the target rejects repeatedly (an unparseable value, a row that can
+never satisfy a constraint) used to wedge `replicat` forever — the apply cursor
+could never advance past it. Now a failing **non-key-move** record is retried
+`poison_retries` times (default 3) and then **moved to `dead_letter.jsonl`** beside
+the trail (same atomic append+fsync discipline), logged loudly with its
+position/table/key, and the cursor **advances past it**. Dead-lettered records are
+counted in the `replicat` summary and shown as `dead_letters=N` in `a2h extracts`.
+
+- **A sick target never dead-letters the backlog.** Before parking a record the
+  replicat `ping()`s the target. A failing ping means the record failed because the
+  target is *down*, not because the data is poison, so `replicat` **raises with the
+  cursor unmoved** (the next run retries) instead of dead-lettering every record a
+  transient outage rejected. Only a record a *healthy* (ping-answering) target
+  rejects after `poison_retries` attempts is parked.
+- **Mass poison fails closed (`poison_max_per_run`, default 25).** If a single run
+  would dead-letter more than this many records it raises instead — a flood of
+  "poison" is almost always an environment fault (wrong target, schema drift), not
+  bad data. `0` disables the breaker. After you have investigated, a re-run skips
+  the already-parked records (deduped by `source_pos`) and proceeds.
+- **Key-moves are never dead-lettered.** Skipping a key-move diverges key state
+  (the old-key row leaks or the moved row is lost), so a key-move failure **fails
+  closed** (raises) instead — fix the cause and re-run.
+- **Replays never double-dead-letter** — *for records that carry a `source_pos`*. A
+  crash between the dead-letter append and the cursor write would replay the record;
+  the policy dedups by `source_pos`, so a record already parked is skipped, not
+  re-recorded. Records with **no `source_pos`** (Oracle SCN-watermark capture, whose
+  rows carry no per-event coordinate) cannot be deduped this way — the cursor
+  advances past them on the successful run, so the replay window is only a
+  crash-between-append-and-cursor-write, but a poison Oracle record hit in that
+  narrow window *can* be recorded twice.
+- `poison_retries = 0` disables the policy entirely — a failing record raises, the
+  pre-tier-2 fail-closed behaviour.
+
+Inspect `dead_letter.jsonl` (each line carries the failure reason, the trail
+position, and the full record), fix the target/data, and replay those changes
+manually — the replicat will not.
+
+### Trail rotation & retention (`trail_rotate_mb`)
+
+`trail.jsonl` grew forever and the replicat read was O(file). When
+`trail_rotate_mb` is set (default 256), the trail is split into size-bounded
+**segments**: the legacy `trail.jsonl` is segment 0 and rotated segments are
+`trail.00001.jsonl`, `trail.00002.jsonl`, … The active segment is always the
+highest-numbered one.
+
+Crucially the apply **cursor stays a single global line index** across every
+segment — it never becomes a `(segment, line)` pair — so a **legacy single-file
+trail and its integer cursor keep working byte-for-byte**, and the keymove
+barrier, torn-tail heal, and `source_pos` dedup are all unchanged. `0` disables
+rotation.
+
+`a2h extract NAME --purge-applied` (MCP: `purge_applied: true`) deletes
+fully-applied **closed** segments — never the active one, never past the apply
+cursor. The count of removed lines is persisted (`trail.meta`) so the global cursor
+stays valid across a purge. This is a manual verb (no automatic purge), so you
+choose when to reclaim disk.
 
 ## v2 roadmap
 
