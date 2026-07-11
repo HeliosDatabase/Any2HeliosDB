@@ -233,6 +233,39 @@ class TargetDriver(abc.ABC):
     ) -> int: ...
 
     @abc.abstractmethod
+    def update_columns(
+        self,
+        target_table: str,
+        key_cols: Sequence[str],
+        set_cols: Sequence[str],
+        rows: Iterable[Sequence[object]],
+    ) -> int:
+        """Apply a keyed, column-subset UPDATE and return the rows actually matched.
+
+        Each row in *rows* is a flat tuple in SQL order: the *set_cols* values
+        first, then the *key_cols* values — i.e. ``UPDATE <table> SET <set_cols> =
+        <set-values> WHERE <key_cols> = <key-values>``. The return value is the
+        summed row count actually **matched** (0 when a key matched nothing), which
+        the CDC apply uses both as an existence probe and to decide whether to fall
+        back to an insert. Every implementation reports rows matched rather than
+        rows changed (the psycopg/PG-wire and native/Oracle UPDATE naturally counts
+        a matched-but-unchanged row; the MySQL driver connects with
+        ``CLIENT_FOUND_ROWS`` to do the same), so a value-unchanged re-apply still
+        reports the match.
+
+        Unlike :meth:`upsert`, this touches *only* ``set_cols`` and leaves every
+        other column of the matched row exactly as it was. That matters because the
+        upsert implementations differ: the **native** (Oracle) upsert is a
+        DELETE-by-key + INSERT that NULLs any column the caller omitted, whereas the
+        psycopg (``ON CONFLICT DO UPDATE``) and MySQL (``ON DUPLICATE KEY UPDATE``)
+        upserts merge and so preserve an omitted column on a conflict but still
+        default it on a fresh insert. ``update_columns`` never deletes the row, so
+        it keeps an unchanged-TOAST partial image safe on *every* driver, and lets a
+        primary-key-changing UPDATE move a row (``set_cols`` may include the key
+        columns) without deleting the parent row first.
+        """
+
+    @abc.abstractmethod
     def delete_keys(
         self, target_table: str, key_cols: Sequence[str], keys: Iterable[Sequence[object]]
     ) -> int: ...

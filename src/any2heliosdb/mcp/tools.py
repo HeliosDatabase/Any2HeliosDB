@@ -417,7 +417,12 @@ def _h_replicat(args: Dict[str, Any]) -> Dict[str, Any]:
     name = args.get("name")
     if not name:
         raise Any2HeliosError("replicat requires a 'name'")
-    reconcile = bool(args.get("reconcile_deletes", True))
+    # Omit `reconcile_deletes` -> None -> engine picks the source-mode-aware default
+    # (ON for Oracle SCN, OFF for log-based sources). An explicit value forces it.
+    # Present-but-null must also mean "default" — agents commonly send explicit
+    # nulls for "no preference", and bool(None) would silently force it OFF.
+    _rd = args.get("reconcile_deletes")
+    reconcile = None if _rd is None else bool(_rd)
     r = run_replicat(cfg, str(name), reconcile_deletes=reconcile)
     r["ok"] = True
     return r
@@ -510,9 +515,13 @@ def build_catalog() -> "ToolRegistry":
                  "Capture source changes into the named CDC trail.",
                  _h_extract, properties=name_props, required=["name"]))
     rep_props = dict(name_props)
-    rep_props["reconcile_deletes"] = {"type": "boolean",
-                                      "description": "Reconcile deletes via key-set diff.",
-                                      "default": True}
+    rep_props["reconcile_deletes"] = {
+        "type": "boolean",
+        "description": ("Reconcile deletes via a source/target key-set diff. Omit for the "
+                        "mode-aware default: ON for the Oracle SCN source (no delete "
+                        "events), OFF for log-based sources (MySQL binlog / PG logical "
+                        "carry explicit deletes; reconcile there is redundant and races a "
+                        "keymove). Set true/false to force.")}
     reg.add(Tool("replicat", Role.ADMIN,
                  "Apply captured CDC changes from the named trail to the target.",
                  _h_replicat, properties=rep_props, required=["name"]))

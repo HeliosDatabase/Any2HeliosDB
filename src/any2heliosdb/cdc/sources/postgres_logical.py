@@ -26,13 +26,22 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal, InvalidOperation
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ...core.change_record import DELETE, INSERT, UPDATE, ChangeRecord
+from ...errors import Any2HeliosError
 
 _SLOT_SANITIZE = re.compile(r"[^a-z0-9_]")
 # "table <schema>.<rel>: <OP>: <fields>"
 _LINE_RE = re.compile(r"^table\s+(.+?):\s+(INSERT|UPDATE|DELETE):\s*(.*)$")
+# test_decoding's sentinel for a TOASTed column NOT modified by the UPDATE: it
+# emits the bare token below (never quoted) instead of the value, because the
+# out-of-line datum was not rewritten. Storing it as the column value would
+# clobber the target's real (large) value with this literal string, so we OMIT
+# the column and let the replicat do a column-subset update. A genuine text value
+# of these exact characters arrives single-quoted, so the bare-token match here
+# can never collide with real data.
+_UNCHANGED_TOAST = "unchanged-toast-datum"
 # A trailing timezone offset on a timestamp literal: '+00', '-0530', '+05:30', 'Z'.
 _TZ_SUFFIX = re.compile(r"(?:[+-]\d{2}(?::?\d{2})?|Z)$")
 
@@ -40,6 +49,24 @@ _TZ_SUFFIX = re.compile(r"(?:[+-]\d{2}(?::?\d{2})?|Z)$")
 def slot_name(extract_name: str) -> str:
     """A valid PG slot name (<=63 chars, ``[a-z0-9_]``) derived from the extract."""
     return ("a2h_" + _SLOT_SANITIZE.sub("_", extract_name.lower()))[:63]
+
+
+def lsn_to_int(lsn: str) -> Optional[int]:
+    """Encode a PostgreSQL LSN ``'<hi>/<lo>'`` (hex halves) as one comparable int.
+
+    A pg_lsn is a 64-bit WAL byte position printed as two 32-bit hex halves, so
+    ``(hi << 32) | lo`` recovers the monotonically-increasing integer the extract
+    uses to drop already-trailed changes. Returns ``None`` for an empty/malformed
+    value (the caller then leaves ``source_pos`` unset — no dedup, still correct
+    under at-least-once).
+    """
+    hi, slash, lo = (lsn or "").partition("/")
+    if not slash:
+        return None
+    try:
+        return (int(hi, 16) << 32) | int(lo, 16)
+    except ValueError:
+        return None
 
 
 def _strip_ident(s: str) -> str:
@@ -147,8 +174,13 @@ def parse_fields(s: str) -> Dict[str, object]:
             j = i
             while j < n and s[j] != " ":
                 j += 1
-            out[name] = _coerce(s[i:j], quoted=False, typ=typ)
+            tok = s[i:j]
             i = j
+            # OMIT an unchanged-TOAST column (bare sentinel) so a partial update
+            # leaves the target's stored value alone rather than overwriting it.
+            if tok == _UNCHANGED_TOAST:
+                continue
+            out[name] = _coerce(tok, quoted=False, typ=typ)
     return out
 
 
@@ -170,16 +202,88 @@ def parse_change(data: str, schema: str, pk_by_table: Dict[str, List[str]],
         return None
     if op == "DELETE":
         return ChangeRecord(op=DELETE, schema=schema, table=tbl, key=parse_fields(rest))
-    # INSERT or UPDATE. The key-changed UPDATE form is "old-key: ... new-tuple: ...".
+    # INSERT or UPDATE. The key-changed UPDATE form is
+    # "old-key: <pre-image> new-tuple: <post-image>". ``key`` always carries the
+    # NEW/current identity; when the PK actually moved we also record the old
+    # identity in ``before_key`` so the replicat drops the orphaned old-key row.
+    before_key: Dict[str, object] = {}
     if "new-tuple:" in rest:
         oldpart, newpart = rest.split("new-tuple:", 1)
         after = parse_fields(newpart)
-        key = parse_fields(oldpart.replace("old-key:", "", 1)) or {k: after.get(k) for k in pk}
+        # old-key/old-tuple is the pre-image: just the PK under the default
+        # REPLICA IDENTITY, or every column under FULL — keep only the key cols.
+        old = parse_fields(oldpart.replace("old-key:", "", 1))
+        # A PK component the UPDATE did not touch is emitted as an unchanged-TOAST
+        # datum and therefore OMITTED from the after-image (parse_fields drops it).
+        # Its value is unchanged, so it equals the pre-image's — recover it from
+        # the old-key so the record's key (and its insertable after-image) never
+        # carries a None PK component. Fail closed if it is unrecoverable.
+        _fill_pk_from_old(after, old, pk, schema, tbl)
+        key = {k: after[k] for k in pk}
+        # A key-changing UPDATE must carry EVERY PK component in its pre-image
+        # (old-key), or we cannot identify the row to move. Under REPLICA IDENTITY
+        # USING INDEX (a non-PK index) the pre-image carries the index columns, not
+        # the PK, so ``{k: old[k] for k in pk if k in old}`` would silently yield a
+        # partial/empty before_key -> the old-key row leaks or a duplicate logical
+        # row appears. Fail closed with the same actionable REPLICA IDENTITY message
+        # as an unrecoverable PK (K3). Under DEFAULT the old-key IS the PK, and under
+        # FULL the pre-image is the whole row, so both carry every PK component —
+        # this only fires for the genuinely unsafe USING-INDEX(non-PK) config.
+        missing_old = [k for k in pk if k not in old]
+        before_key = {} if missing_old else {k: old[k] for k in pk}
+        if before_key == key:
+            before_key = {}
+        elif missing_old:
+            raise _replica_identity_error(schema, tbl, missing_old)
     else:
         after = parse_fields(rest)
-        key = {k: after.get(k) for k in pk}
+        # Non-key-changing UPDATE under REPLICA IDENTITY DEFAULT: there is no
+        # pre-image line, so an unchanged-TOAST (hence omitted) PK component cannot
+        # be recovered — fail closed rather than key the row on None.
+        _require_full_pk(after, pk, schema, tbl)
+        key = {k: after[k] for k in pk}
     return ChangeRecord(op=(INSERT if op == "INSERT" else UPDATE),
-                        schema=schema, table=tbl, key=key, after=after)
+                        schema=schema, table=tbl, key=key, after=after, before_key=before_key)
+
+
+def _replica_identity_error(schema: str, tbl: str, missing: List[str]) -> Any2HeliosError:
+    return Any2HeliosError(
+        "PostgreSQL CDC: an UPDATE on {}.{} left primary-key column(s) {} as an "
+        "unchanged-TOAST datum with no pre-image to recover them from, so the row "
+        "cannot be keyed without setting a PK column to NULL (a guaranteed apply "
+        "failure). Set REPLICA IDENTITY FULL (or USING INDEX <pk-index>) on that "
+        "table so the WAL carries the full key on every UPDATE. NOTE: the "
+        "offending change is already decoded in the replication slot, so fixing "
+        "the table alone does not unwedge this extract — the slot re-peeks the "
+        "same change every run. To unblock, either re-snapshot the table (migrate "
+        "it again, then recreate the slot), or advance/recreate the slot past the "
+        "poisoned change and accept losing the changes up to that point."
+        .format(schema, tbl, missing))
+
+
+def _fill_pk_from_old(after: Dict[str, object], old: Dict[str, object],
+                      pk: List[str], schema: str, tbl: str) -> None:
+    """Backfill any PK column omitted from *after* (unchanged TOAST) from *old*.
+
+    Mutates *after* in place. Raises if a PK column is present in neither image —
+    a None-keyed record would SET a PK column to NULL (PK violation) and render a
+    ``WHERE pk = NULL`` on the partial path.
+    """
+    missing = [k for k in pk if k not in after and k not in old]
+    if missing:
+        raise _replica_identity_error(schema, tbl, missing)
+    for k in pk:
+        if k not in after:
+            after[k] = old[k]
+
+
+def _require_full_pk(after: Dict[str, object], pk: List[str],
+                     schema: str, tbl: str) -> None:
+    """Raise unless every PK column is present in *after* (no pre-image to fall
+    back on, so an omitted — unchanged-TOAST — PK component is unrecoverable)."""
+    missing = [k for k in pk if k not in after]
+    if missing:
+        raise _replica_identity_error(schema, tbl, missing)
 
 
 class PostgresLogicalSource:
@@ -210,6 +314,14 @@ class PostgresLogicalSource:
                          if not (t.primary_key and t.primary_key.columns))
         records: List[ChangeRecord] = []
         last_lsn = ""
+        # Several test_decoding change lines can share one LSN within a transaction,
+        # so tag each record with a per-base ordinal: the first record at a base
+        # keeps the bare int LSN (wire-compatible), later records at the SAME base
+        # become ``[base, seq]``. That gives every RECORD a total order (stable
+        # across a re-peek since the slot re-delivers the same line order), so a
+        # prefix crash within a transaction re-appends only the never-trailed
+        # remainder instead of dropping the shared-LSN tail.
+        seq_by_base: Dict[int, int] = {}
         for lsn, data in self.adapter._qall(
                 "SELECT lsn::text, data FROM pg_logical_slot_peek_changes(%s, NULL, NULL)",
                 self.slot):
@@ -217,8 +329,39 @@ class PostgresLogicalSource:
                 last_lsn = lsn
             rec = parse_change(data, self.schema, self._pk, self._known)
             if rec is not None:
+                # Tag the record with its LSN so the engine can drop it on a
+                # re-peek if a crash lost the slot advance after the trail append.
+                base = lsn_to_int(lsn)
+                if base is None:
+                    rec.source_pos = None
+                else:
+                    seq = seq_by_base.get(base, 0)
+                    seq_by_base[base] = seq + 1
+                    rec.source_pos = base if seq == 0 else [base, seq]
                 records.append(rec)
         return records, last_lsn, skipped
+
+    def epoch_identity(self) -> Optional[str]:
+        """Identity of the LSN coordinate space: ``<system_identifier>:<timeline>``.
+
+        LSNs are only comparable within one cluster lifetime AND timeline: a
+        different cluster (same trail dir pointed elsewhere) has a different
+        ``system_identifier``, and a PITR restore of the SAME cluster bumps the
+        ``timeline_id`` while rewinding LSNs. Either change means positions in an
+        existing trail can no longer be ordered against newly peeked ones — the
+        engine fails closed on a mismatch instead of letting dedup silently drop
+        genuinely new changes that happen to order at-or-below the stale tail.
+        Returns ``None`` when the control functions are unavailable (restricted
+        environments); the LSN-order sanity check still applies then.
+        """
+        try:
+            sysid = self.adapter._q1("SELECT system_identifier FROM pg_control_system()")
+            tli = self.adapter._q1("SELECT timeline_id FROM pg_control_checkpoint()")
+        except Exception:  # noqa: BLE001 - identity probe is best-effort by design
+            return None
+        if not sysid or not tli:
+            return None
+        return "{}:{}".format(sysid[0], tli[0])
 
     def advance(self, lsn: str) -> None:
         """Consume the slot up to *lsn* (called after the batch is durably in the

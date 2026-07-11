@@ -3,12 +3,20 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from any2heliosdb.cdc.sources.postgres_logical import (
     parse_change, parse_fields, slot_name)
 from any2heliosdb.core.change_record import DELETE, INSERT, UPDATE
+from any2heliosdb.errors import Any2HeliosError
 
 PK = {"ACTOR": ["actor_id"], "X": ["id"]}
 KNOWN = {"ACTOR", "X"}
+
+# A composite-PK table (K3): the parser must never let a PK component become None
+# when its (unchanged, TOASTed) value is omitted from the UPDATE's after-image.
+CPK = {"DOC": ["tenant", "docid"]}
+CKNOWN = {"DOC"}
 
 
 def test_slot_name_sanitized():
@@ -72,13 +80,200 @@ def test_parse_change_skips_txn_and_unknown_tables():
 
 
 def test_parse_change_key_changed_update_form():
-    # When the PK changes (or REPLICA IDENTITY FULL), test_decoding emits
-    # "old-key: ... new-tuple: ...". The key must come from old-key, the image
-    # from new-tuple.
+    # A PK-changing UPDATE emits "old-key: <old pk> new-tuple: <new image>". The
+    # record's key is the NEW identity (from new-tuple); the OLD identity is
+    # carried in before_key so the replicat can delete the orphaned old-key row.
     rec = parse_change(
         "table public.actor: UPDATE: old-key: actor_id[integer]:201 "
         "new-tuple: actor_id[integer]:202 first_name[character varying]:'New'",
         "public", PK, KNOWN)
     assert rec is not None and rec.op == UPDATE
-    assert rec.key == {"actor_id": 201}
+    assert rec.key == {"actor_id": 202}                 # new identity
+    assert rec.before_key == {"actor_id": 201}          # old identity to delete
     assert rec.after["actor_id"] == 202 and rec.after["first_name"] == "New"
+
+
+def test_parse_change_replica_identity_full_non_key_update_has_no_before_key():
+    # Under REPLICA IDENTITY FULL every UPDATE emits old-key/new-tuple with the
+    # full pre-image, but when the PK did NOT change there is nothing to delete —
+    # before_key must be empty (only the changed-PK case carries it).
+    rec = parse_change(
+        "table public.actor: UPDATE: old-key: actor_id[integer]:201 "
+        "first_name[character varying]:'Old' new-tuple: actor_id[integer]:201 "
+        "first_name[character varying]:'New'",
+        "public", PK, KNOWN)
+    assert rec is not None and rec.op == UPDATE
+    assert rec.key == {"actor_id": 201}
+    assert rec.before_key == {}
+    assert rec.after["first_name"] == "New"
+
+
+def test_parse_fields_omits_unchanged_toast_datum():
+    # test_decoding emits the bare 'unchanged-toast-datum' sentinel for a TOASTed
+    # column left untouched by an UPDATE. It must be OMITTED (not stored as the
+    # literal string), so the replicat leaves the target's real value alone.
+    f = parse_fields("id[integer]:5 body[text]:unchanged-toast-datum note[text]:'kept'")
+    assert "body" not in f                       # omitted, never the literal marker
+    assert f["id"] == 5 and f["note"] == "kept"
+
+
+def test_parse_fields_keeps_quoted_lookalike_toast_string():
+    # A genuine text value equal to the sentinel arrives single-quoted and MUST be
+    # preserved — only the bare token is the marker.
+    f = parse_fields("id[integer]:5 body[text]:'unchanged-toast-datum'")
+    assert f["body"] == "unchanged-toast-datum"
+
+
+def test_parse_change_update_omits_unchanged_toast_column():
+    rec = parse_change(
+        "table public.actor: UPDATE: actor_id[integer]:201 "
+        "first_name[character varying]:'Penny' bio[text]:unchanged-toast-datum",
+        "public", PK, KNOWN)
+    assert rec is not None and rec.op == UPDATE
+    assert rec.key == {"actor_id": 201}
+    assert "bio" not in rec.after                # omitted -> partial (column-subset) update
+    assert rec.after["first_name"] == "Penny"
+
+
+# --- K3: composite-PK with an unchanged-TOAST key component -------------------
+
+
+def test_parse_change_composite_pk_keymove_recovers_omitted_pk_from_old_key():
+    # A keymove that changes docid while leaving the TOASTed `tenant` key component
+    # untouched: test_decoding omits `tenant` from the new-tuple (unchanged TOAST).
+    # The recovered value comes from the old-key pre-image, so neither the record
+    # key NOR its insertable after-image ever carries a None PK component.
+    rec = parse_change(
+        "table public.doc: UPDATE: old-key: tenant[text]:'acme' docid[integer]:1 "
+        "new-tuple: docid[integer]:2 tenant[text]:unchanged-toast-datum body[text]:'x'",
+        "public", CPK, CKNOWN)
+    assert rec is not None and rec.op == UPDATE
+    assert rec.key == {"tenant": "acme", "docid": 2}        # no None component
+    assert rec.before_key == {"tenant": "acme", "docid": 1}  # PK moved -> old identity
+    assert rec.after["tenant"] == "acme"                    # backfilled -> insertable
+    assert rec.after["docid"] == 2 and rec.after["body"] == "x"
+
+
+def test_parse_change_composite_pk_keymove_unchanged_tenant_only_docid_moves():
+    # Symmetric: the moving component is present, the unchanged component recovered.
+    rec = parse_change(
+        "table public.doc: UPDATE: old-key: tenant[text]:'acme' docid[integer]:7 "
+        "new-tuple: tenant[text]:unchanged-toast-datum docid[integer]:8",
+        "public", CPK, CKNOWN)
+    assert rec.key == {"tenant": "acme", "docid": 8}
+    assert rec.before_key == {"tenant": "acme", "docid": 7}
+    assert rec.after["tenant"] == "acme"
+
+
+def test_parse_change_composite_pk_non_key_update_omitted_pk_fails_closed():
+    # Non-key-changing UPDATE under REPLICA IDENTITY DEFAULT: no pre-image line, so
+    # an omitted (unchanged-TOAST) PK component is unrecoverable -> fail closed with
+    # an actionable REPLICA IDENTITY FULL message, never a None-keyed record.
+    with pytest.raises(Any2HeliosError) as ei:
+        parse_change(
+            "table public.doc: UPDATE: docid[integer]:1 "
+            "tenant[text]:unchanged-toast-datum body[text]:'y'",
+            "public", CPK, CKNOWN)
+    msg = str(ei.value)
+    assert "REPLICA IDENTITY FULL" in msg and "tenant" in msg
+
+
+def test_parse_change_composite_pk_keymove_unrecoverable_pk_fails_closed():
+    # Even in the keymove form, if the pre-image itself lacks a PK component that is
+    # also omitted from the after-image, it is unrecoverable -> fail closed.
+    with pytest.raises(Any2HeliosError) as ei:
+        parse_change(
+            "table public.doc: UPDATE: old-key: docid[integer]:1 "
+            "new-tuple: docid[integer]:2 tenant[text]:unchanged-toast-datum",
+            "public", CPK, CKNOWN)
+    assert "tenant" in str(ei.value)
+
+
+def test_parse_change_keymove_old_key_missing_pk_fails_closed():
+    # S4(1): under REPLICA IDENTITY USING INDEX (a non-PK index) the pre-image
+    # (old-key) carries index columns, not the PK. A key-changing UPDATE whose
+    # new-tuple supplies the (new) PK but whose old-key lacks a PK component would
+    # yield a partial/empty before_key -> the old-key row leaks or a duplicate
+    # logical row appears. Fail closed with the actionable REPLICA IDENTITY message.
+    with pytest.raises(Any2HeliosError) as ei:
+        parse_change(
+            "table public.doc: UPDATE: old-key: idxcol[integer]:99 "
+            "new-tuple: tenant[text]:'acme' docid[integer]:2 body[text]:'x'",
+            "public", CPK, CKNOWN)
+    msg = str(ei.value)
+    assert "REPLICA IDENTITY" in msg and ("tenant" in msg or "docid" in msg)
+
+
+def test_parse_change_composite_pk_full_image_unaffected():
+    # A full after-image (both PK components present) keeps working unchanged.
+    rec = parse_change(
+        "table public.doc: UPDATE: tenant[text]:'acme' docid[integer]:3 body[text]:'z'",
+        "public", CPK, CKNOWN)
+    assert rec.key == {"tenant": "acme", "docid": 3}
+    assert rec.before_key == {}
+
+
+def test_parse_change_single_pk_partial_update_still_parses():
+    # Existing single-PK behaviour is unchanged: a partial UPDATE that omits a
+    # NON-key TOAST column keys fine (the PK itself is present).
+    rec = parse_change(
+        "table public.actor: UPDATE: actor_id[integer]:5 bio[text]:unchanged-toast-datum "
+        "first_name[character varying]:'Q'", "public", PK, KNOWN)
+    assert rec.key == {"actor_id": 5} and "bio" not in rec.after
+
+
+# --- K2: capture tags each record with the LSN as source_pos ------------------
+
+
+class _FakeAdapter:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def _q1(self, sql, *p):
+        return (1,) if "pg_replication_slots" in sql else None
+
+    def _qall(self, sql, *p):
+        return self._rows
+
+
+def _actor_table():
+    from any2heliosdb.core.catalog_model import Column, DataType, PrimaryKey, Table
+    return Table(name="actor", schema="public",
+                 columns=[Column("actor_id", DataType.decimal(10, 0))],
+                 primary_key=PrimaryKey(columns=["actor_id"]))
+
+
+def test_capture_tags_records_with_lsn_source_pos():
+    from any2heliosdb.cdc.sources.postgres_logical import PostgresLogicalSource, lsn_to_int
+    rows = [
+        ("0/1A0", "BEGIN 700"),
+        ("0/1A2", "table public.actor: INSERT: actor_id[integer]:1"),
+        ("0/1B4", "table public.actor: UPDATE: actor_id[integer]:1"),
+        ("0/1C0", "COMMIT 700"),
+    ]
+    records, last_lsn, skipped = PostgresLogicalSource(
+        _FakeAdapter(rows), "public", [_actor_table()], "e1").capture()
+    # Distinct LSNs -> each base seen once -> bare int (wire-compatible).
+    assert [r.source_pos for r in records] == [lsn_to_int("0/1A2"), lsn_to_int("0/1B4")]
+    assert records[0].source_pos < records[1].source_pos   # monotonic for dedup
+    assert last_lsn == "0/1C0" and skipped == []
+
+
+def test_capture_records_sharing_one_lsn_get_compound_source_pos():
+    # S2 on the PG path: several change lines can share an LSN within a transaction.
+    # They must stay totally ordered per RECORD via a compound [base, seq] (the
+    # first at a base keeps the bare int), so a prefix crash re-appends only the
+    # never-trailed tail instead of dropping the shared-LSN remainder forever.
+    from any2heliosdb.cdc.sources.postgres_logical import PostgresLogicalSource, lsn_to_int
+    from any2heliosdb.core.change_record import source_pos_key
+    base = lsn_to_int("0/2A0")
+    rows = [
+        ("0/2A0", "table public.actor: INSERT: actor_id[integer]:1"),
+        ("0/2A0", "table public.actor: INSERT: actor_id[integer]:2"),
+        ("0/2A0", "table public.actor: INSERT: actor_id[integer]:3"),
+    ]
+    records, _, _ = PostgresLogicalSource(
+        _FakeAdapter(rows), "public", [_actor_table()], "e1").capture()
+    assert [r.source_pos for r in records] == [base, [base, 1], [base, 2]]
+    keys = [source_pos_key(r.source_pos) for r in records]
+    assert keys == sorted(keys) and len(set(keys)) == 3    # strict total order
