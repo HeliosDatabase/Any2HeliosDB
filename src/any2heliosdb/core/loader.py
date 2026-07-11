@@ -57,7 +57,7 @@ class LoadStats:
 class ResumableLoader:
     def __init__(self, cfg, schema, manifest_path, run_id, parallelism=4,
                  use_copy=True, preserve_case=False, fresh=False,
-                 concurrent_writes=True):
+                 concurrent_writes=True, batch_size=1000):
         self.cfg = cfg
         self.schema = schema
         self.manifest_path = manifest_path
@@ -66,6 +66,13 @@ class ResumableLoader:
             getattr(cfg, "options", None), "manifest_backend", "sqlite")
         self.run_id = run_id
         self.parallelism = max(1, int(parallelism))
+        # Source-side fetch arraysize for the per-chunk streaming read (config
+        # [options].batch_size). Threaded through to stream_rows in _load_chunk so
+        # the documented knob actually tunes this (resumable/parallel) path — not
+        # only the sequential fallback. Deliberately NOT part of _config_hash: it
+        # is not plan-affecting (chunk predicates/bounds don't depend on it), so
+        # changing it across a resume must not trip the drift reset.
+        self.batch_size = max(1, int(batch_size))
         self.use_copy = use_copy
         self.preserve_case = preserve_case
         # Whether the target services concurrent write transactions. The Apache
@@ -269,7 +276,11 @@ class ResumableLoader:
         """Stable hash of the plan-affecting config (source/target identity +
         schema + parallelism + preserve_case; passwords excluded). Drives the
         drift guard in plan() so a reused run_id can't trust stale LOADED chunks
-        after the config that produced them changed."""
+        after the config that produced them changed.
+
+        batch_size is intentionally EXCLUDED: it only sets the per-chunk fetch
+        arraysize, not the chunk plan (predicates/bounds), so changing it across a
+        resume must not invalidate already-LOADED chunks."""
         import hashlib
         s, t, o = self.cfg.source, self.cfg.target, self.cfg.options
         src_db = (getattr(s, "database", None) or getattr(s, "service_name", None)
@@ -364,7 +375,8 @@ class ResumableLoader:
             tw = chunk.target_where(self.preserve_case)
             cols = [c.name for c in table.columns]
             tcols = [_ident(c, self.preserve_case) for c in cols]
-            rows = src.stream_rows(table, cols, where=chunk.source_where())
+            rows = src.stream_rows(table, cols, where=chunk.source_where(),
+                                   arraysize=self.batch_size)
             # Atomic per-chunk: DELETE range + load in one transaction (idempotent).
             # No in-chunk COPY->INSERT fallback: a transient COPY failure (e.g. a
             # target that serializes transactions) is retried by the loader's

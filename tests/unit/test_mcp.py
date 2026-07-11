@@ -264,6 +264,158 @@ def test_migrate_dispatch_calls_engine_with_parsed_args(monkeypatch):
     assert "run_id" in payload
 
 
+def test_migrate_batch_size_override_reaches_engine(monkeypatch):
+    """The MCP migrate ``batch_size`` override must reach run_migrate's batch_size
+    kwarg — the seam the orchestrator threads into the resumable loader (so the
+    documented knob is not a no-op on the chunked path)."""
+    captured = {}
+
+    class _Stats:
+        tables = 0
+        rows = {}
+        load_mode = "copy"
+        warnings = []
+        failed_chunks = 0
+
+        @property
+        def total_rows(self):
+            return 0
+
+    def fake_migrate(source, target, **kwargs):
+        captured["kwargs"] = kwargs
+        return _Stats()
+
+    class _FakeAdapter:
+        def connect(self):
+            pass
+
+        def close(self):
+            pass
+
+    import any2heliosdb.config.store as store
+    import any2heliosdb.core.orchestrator as orch
+
+    monkeypatch.setattr(orch, "migrate", fake_migrate)
+    monkeypatch.setattr(store, "build_source_adapter", lambda cfg: _FakeAdapter())
+    monkeypatch.setattr(store, "build_target_driver", lambda cfg: _FakeAdapter())
+    monkeypatch.setattr(store, "build_type_registry", lambda cfg: object())
+
+    disp = Dispatcher(build_catalog())
+    disp.handle(
+        {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+         "params": {"name": "migrate", "arguments": {
+             "source": {"dialect": "oracle", "host": "h", "user": "u", "service_name": "S"},
+             "target": {"driver": "psycopg", "host": "t", "dbname": "db"},
+             "options": {"output_dir": "/tmp/out"},
+             "batch_size": 250}}},
+        _principal(Role.ADMIN))
+    assert captured["kwargs"]["batch_size"] == 250
+
+
+def test_test_count_uses_effective_preserve_case_for_native_target(monkeypatch):
+    """Parity fix: against a native (Oracle) target the MCP test_count handler must
+    pass the SAME effective preserve_case the CLI helper resolves — True even when
+    options.preserve_case is False — or it would query wrong-cased relations and
+    report false FAILs while the CLI passes."""
+    from any2heliosdb.validate.model import ValidationResult, ValidationType
+    from any2heliosdb.validate.util import effective_preserve_case
+
+    res = ValidationResult(validation_type=ValidationType.TEST_COUNT)
+    captured = {}
+
+    class _FakeSchema:
+        tables = []
+
+    class _FakeSrc:
+        def connect(self):
+            pass
+
+        def close(self):
+            pass
+
+        def introspect_schema(self, schema):
+            return _FakeSchema()
+
+    class _NativeTgt:
+        dialect = "oracle"  # native target keeps source (upper) case
+
+        def connect(self):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_count(src, tgt, tables, preserve_case):
+        captured["preserve_case"] = preserve_case
+        return res
+
+    import any2heliosdb.config.store as store
+    import any2heliosdb.validate.counts as counts
+
+    tgt = _NativeTgt()
+    monkeypatch.setattr(store, "build_source_adapter", lambda cfg: _FakeSrc())
+    monkeypatch.setattr(store, "build_target_driver", lambda cfg: tgt)
+    monkeypatch.setattr(counts, "run_test_count", fake_count)
+
+    disp = Dispatcher(build_catalog())
+    disp.handle(
+        {"jsonrpc": "2.0", "id": 12, "method": "tools/call",
+         "params": {"name": "test_count", "arguments": {
+             "source": {"dialect": "oracle", "host": "h", "user": "u", "service_name": "S"},
+             "target": {"driver": "native", "host": "t", "dbname": "db"}}}},
+        _principal(Role.VIEWER))
+    # handler resolved the effective value (native -> True), matching the CLI helper
+    assert captured["preserve_case"] is True
+    cfg_like = type("C", (), {"options": type("O", (), {"preserve_case": False})()})()
+    assert captured["preserve_case"] == effective_preserve_case(cfg_like, tgt)
+
+
+def test_assess_includes_procedural_gaps(monkeypatch):
+    """The MCP assess tool must surface the procedural gap report (routines /
+    triggers / mviews / partitions) exactly like the CLI — without it agents
+    always saw an empty 'gaps' list even for PL/SQL-heavy schemas."""
+    import types
+
+    from any2heliosdb.core.catalog_model import Routine, RoutineKind, Schema
+    from any2heliosdb.plsql.procedural import build_procedural_gaps
+
+    schema = Schema("HR", routines=[
+        Routine(name="CALC_BONUS", kind=RoutineKind.FUNCTION, body="BEGIN NULL; END;")])
+
+    class _FakeSrc:
+        def connect(self):
+            pass
+
+        def close(self):
+            pass
+
+        def introspect_schema(self, s):
+            return schema
+
+    import any2heliosdb.config.store as store
+
+    monkeypatch.setattr(store, "build_source_adapter", lambda cfg: _FakeSrc())
+    monkeypatch.setattr(
+        store, "build_type_registry",
+        lambda cfg: types.SimpleNamespace(dialect=types.SimpleNamespace(value="oracle")))
+
+    disp = Dispatcher(build_catalog())
+    resp = disp.handle(
+        {"jsonrpc": "2.0", "id": 15, "method": "tools/call",
+         "params": {"name": "assess", "arguments": {
+             "source": {"dialect": "oracle", "host": "h", "user": "u", "service_name": "S"},
+             "target": {"driver": "psycopg"}}}},
+        _principal(Role.VIEWER))
+    payload = resp["result"]["structuredContent"]
+    assert payload["ok"] is True
+    gaps = payload["report"]["gaps"]
+    # non-empty and matches build_procedural_gaps for the same schema
+    expected = build_procedural_gaps(schema)
+    assert len(gaps) == len(expected.gaps) == 1
+    assert gaps[0]["object_ref"] == "CALC_BONUS"
+    assert "PL/SQL" in gaps[0]["feature"]
+
+
 def test_test_count_dispatch_returns_validation(monkeypatch):
     """viewer-permitted test_count: stub the validator + adapters, assert the
     ValidationResult is serialized and 'ok' tracks passed."""
@@ -392,3 +544,54 @@ def test_default_tokens_file_prefers_env_then_xdg():
     from any2heliosdb.mcp.auth import ENV_TOKENS_FILE, default_tokens_file
     assert default_tokens_file({ENV_TOKENS_FILE: "/x/y/tokens"}) == "/x/y/tokens"
     assert default_tokens_file({}).endswith(os.path.join(".config", "a2h", "mcp-tokens"))
+
+def test_test_structure_uses_effective_preserve_case_for_native_target(monkeypatch):
+    """Reviewer-flagged missed surface: the TEST structure validator on the MCP
+    side must resolve the same effective preserve_case as everything else, or a
+    native target reports every table as a false 'missing on target' BLOCKER."""
+    from any2heliosdb.validate.model import ValidationResult, ValidationType
+
+    res = ValidationResult(validation_type=ValidationType.TEST)
+    captured = {}
+
+    class _FakeSchema:
+        tables = []
+
+    class _FakeSrc:
+        def connect(self):
+            pass
+
+        def close(self):
+            pass
+
+        def introspect_schema(self, schema):
+            return _FakeSchema()
+
+    class _NativeTgt:
+        dialect = "oracle"
+
+        def connect(self):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_test(schema, tgt, preserve_case):
+        captured["preserve_case"] = preserve_case
+        return res
+
+    import any2heliosdb.config.store as store
+    import any2heliosdb.validate.structure as structure
+
+    monkeypatch.setattr(store, "build_source_adapter", lambda cfg: _FakeSrc())
+    monkeypatch.setattr(store, "build_target_driver", lambda cfg: _NativeTgt())
+    monkeypatch.setattr(structure, "run_test", fake_test)
+
+    disp = Dispatcher(build_catalog())
+    disp.handle(
+        {"jsonrpc": "2.0", "id": 13, "method": "tools/call",
+         "params": {"name": "test", "arguments": {
+             "source": {"dialect": "oracle", "host": "h", "user": "u", "service_name": "S"},
+             "target": {"driver": "native", "host": "t", "dbname": "db"}}}},
+        _principal(Role.VIEWER))
+    assert captured["preserve_case"] is True  # native -> effective True, not raw False
