@@ -159,6 +159,16 @@ class TargetDriver(abc.ABC):
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def ping(self) -> None:
+        """Cheap liveness probe: raise if the target is unreachable, else return.
+
+        Used by the CDC replicat to tell a *poison record* (which a healthy target
+        rejects and should be dead-lettered) apart from a *sick target* (a transient
+        outage that fails every record and must NOT dead-letter the whole backlog).
+        The default is a ``SELECT 1`` round-trip; the Oracle native driver overrides
+        it (``SELECT 1 FROM DUAL``)."""
+        self.query("SELECT 1")
+
     # --- introspection ---------------------------------------------------
     @abc.abstractmethod
     def server_banner(self) -> str: ...

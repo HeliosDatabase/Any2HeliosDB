@@ -306,14 +306,30 @@ class PostgresLogicalSource:
                          self.slot)
         return True
 
-    def capture(self) -> Tuple[List[ChangeRecord], str, List[str]]:
-        """Peek (non-consuming) all pending changes; return records, the highest
-        LSN seen (the advance point), and tables skipped for lack of a PK."""
+    def capture(self, limit: int = 0) -> Tuple[List[ChangeRecord], str, List[str]]:
+        """Peek (non-consuming) pending changes; return records, the highest LSN
+        seen (the advance point), and tables skipped for lack of a PK.
+
+        ``limit`` (tier-2 ``capture_batch``) caps
+        ``pg_logical_slot_peek_changes``'s ``upto_nchanges``. That cap is checked at
+        **transaction boundaries**, not per row: decoding stops once at least
+        ``limit`` changes have been emitted AND the current transaction has ended,
+        so a run reads *roughly* that many changes but never splits a transaction.
+        One huge transaction is therefore still materialized whole (the cap can only
+        bound the backlog of *committed transactions* after an outage, not a single
+        giant one) — a documented limitation, not an exact ceiling. ``0`` means no
+        cap (``NULL`` — the pre-tier-2 behaviour). The slot is only advanced past
+        what was captured, so a capped run leaves the remainder for the next one —
+        cursor semantics are unchanged.
+        """
         self.ensure_slot()
         skipped = sorted(t.name for t in self.tables
                          if not (t.primary_key and t.primary_key.columns))
         records: List[ChangeRecord] = []
         last_lsn = ""
+        # ``upto_nchanges`` (3rd arg) caps the peek; NULL = unbounded. A plain int
+        # literal is safe to interpolate (validated int, no user text).
+        upto = "NULL" if not limit or int(limit) <= 0 else str(int(limit))
         # Several test_decoding change lines can share one LSN within a transaction,
         # so tag each record with a per-base ordinal: the first record at a base
         # keeps the bare int LSN (wire-compatible), later records at the SAME base
@@ -323,7 +339,7 @@ class PostgresLogicalSource:
         # remainder instead of dropping the shared-LSN tail.
         seq_by_base: Dict[int, int] = {}
         for lsn, data in self.adapter._qall(
-                "SELECT lsn::text, data FROM pg_logical_slot_peek_changes(%s, NULL, NULL)",
+                "SELECT lsn::text, data FROM pg_logical_slot_peek_changes(%s, NULL, {})".format(upto),
                 self.slot):
             if lsn:
                 last_lsn = lsn
@@ -369,9 +385,45 @@ class PostgresLogicalSource:
         if lsn:
             self.adapter._q1("SELECT pg_replication_slot_advance(%s, %s)", self.slot, lsn)
 
-    def drop_slot(self) -> None:
-        """Remove the slot (cutover/teardown) so it stops pinning WAL."""
+    def drop_slot(self) -> bool:
+        """Remove the slot (cutover/teardown) so it stops pinning WAL.
+
+        Returns ``True`` when a slot was dropped, ``False`` when it was already
+        absent. **Raises** on a real failure (e.g. the slot is still ``active`` on
+        another connection) rather than swallowing it: a still-WAL-pinning slot must
+        not silently vanish from ``a2h extracts`` / ``--lag`` while the caller
+        reports success. The caller keys registry removal on this outcome, so a
+        failed drop leaves the extract intact and visible."""
+        if not self.adapter._q1(
+                "SELECT 1 FROM pg_replication_slots WHERE slot_name = %s", self.slot):
+            return False  # already gone -> nothing to drop, safe to proceed
+        self.adapter._q1("SELECT pg_drop_replication_slot(%s)", self.slot)
+        return True
+
+    def lag(self) -> Optional[Dict[str, object]]:
+        """Replication lag of this extract's slot, or ``None`` if unavailable.
+
+        Reports the slot's ``confirmed_flush_lsn`` / ``restart_lsn`` against the
+        cluster's ``pg_current_wal_lsn()``, plus ``bytes_behind`` — how much WAL
+        the slot is still pinning (a large value warns that an abandoned extract is
+        holding WAL and risks filling the source disk, the motivation for
+        ``a2h extract NAME --drop``). ``None`` when the slot does not exist or the
+        control query is not permitted.
+        """
         try:
-            self.adapter._q1("SELECT pg_drop_replication_slot(%s)", self.slot)
+            row = self.adapter._q1(
+                "SELECT confirmed_flush_lsn::text, restart_lsn::text FROM "
+                "pg_replication_slots WHERE slot_name = %s", self.slot)
+            if not row:
+                return None
+            cur = self.adapter._q1("SELECT pg_current_wal_lsn()::text")
         except Exception:  # noqa: BLE001
-            pass
+            return None
+        confirmed, restart = row[0], row[1]
+        current = cur[0] if cur else None
+        cur_int = lsn_to_int(current) if current else None
+        conf_int = lsn_to_int(confirmed) if confirmed else None
+        behind = (cur_int - conf_int) if (cur_int is not None and conf_int is not None) else None
+        return {"slot": self.slot, "confirmed_flush_lsn": confirmed,
+                "restart_lsn": restart, "current_wal_lsn": current,
+                "bytes_behind": behind}

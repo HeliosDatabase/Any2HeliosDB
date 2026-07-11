@@ -254,7 +254,7 @@ def test_mysql_extract_self_heals_torn_tail_no_dup_no_loss(tmp_path, monkeypatch
         def __init__(self, *a, **k):
             pass
 
-        def capture(self, since):
+        def capture(self, since, limit=0):
             return ([_rec(1, p1), _rec(2, p2), _rec(3, p3)], "mysql-bin.000001:300")
 
     monkeypatch.setattr(mysql_binlog, "MySqlBinlogSource", _FakeSource)
@@ -329,7 +329,7 @@ def test_mysql_extract_crash_replay_appends_no_duplicate(tmp_path, monkeypatch):
         def __init__(self, *a, **k):
             pass
 
-        def capture(self, since):
+        def capture(self, since, limit=0):
             # Re-reading from the stale coordinate re-delivers R1 (pos 100/200)
             # plus a genuinely new event R2 (pos 300).
             return ([_rec(1, p1), _rec(2, p2), _rec(3, p3)], "mysql-bin.000001:300")
@@ -421,7 +421,7 @@ def test_mysql_fresh_anchor_epoch_restart_fails_closed(tmp_path, monkeypatch):
         def __init__(self, *a, **k):
             pass
 
-        def capture(self, since):
+        def capture(self, since, limit=0):
             return ([_rec(2, binlog_pos_to_int("mysql-bin.000001", 100))],
                     "mysql-bin.000001:300")
 
@@ -451,7 +451,7 @@ def test_mysql_fresh_anchor_same_epoch_appends_without_dedup(tmp_path, monkeypat
         def __init__(self, *a, **k):
             pass
 
-        def capture(self, since):
+        def capture(self, since, limit=0):
             return ([_rec(2, binlog_pos_to_int("mysql-bin.000001", 300))],
                     "mysql-bin.000001:300")
 
@@ -487,7 +487,7 @@ class _FakePgSource:
     def epoch_identity(self):
         return type(self).identity
 
-    def capture(self):
+    def capture(self, limit=0):
         return (list(type(self).records), type(self).last_lsn, [])
 
     def advance(self, lsn):
