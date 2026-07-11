@@ -186,13 +186,18 @@ def _h_assess(args: Dict[str, Any]) -> Dict[str, Any]:
 
     from ..assess.report import build_report
     from ..config.store import build_source_adapter, build_type_registry
+    from ..plsql.procedural import build_procedural_gaps
 
     cfg = _load_cfg(args)
     src = build_source_adapter(cfg)
     src.connect()
     try:
         schema = src.introspect_schema(cfg.source.schema)
-        report = build_report(schema, build_type_registry(cfg))
+        # Mirror the CLI `assess`: surface procedural/advanced objects (routines,
+        # triggers, mviews, partitions) as gaps so agents get the same triage data
+        # the CLI prints — without this the MCP report always shows "gaps": [].
+        report = build_report(
+            schema, build_type_registry(cfg), gap_report=build_procedural_gaps(schema))
         data = asdict(report)
         # ``asdict`` keeps the Edition Enum instance; normalize to its value so
         # the result is plain JSON (mirrors assess.render).
@@ -279,6 +284,7 @@ def _h_validate_config(args: Dict[str, Any]) -> Dict[str, Any]:
 def _h_test(args: Dict[str, Any]) -> Dict[str, Any]:
     from ..config.store import build_source_adapter, build_target_driver
     from ..validate.structure import run_test
+    from ..validate.util import effective_preserve_case
 
     cfg = _load_cfg(args)
     src = build_source_adapter(cfg)
@@ -286,7 +292,8 @@ def _h_test(args: Dict[str, Any]) -> Dict[str, Any]:
     src.connect()
     tgt.connect()
     try:
-        res = run_test(src.introspect_schema(cfg.source.schema), tgt, cfg.options.preserve_case)
+        res = run_test(src.introspect_schema(cfg.source.schema), tgt,
+                       effective_preserve_case(cfg, tgt))
         return {"ok": res.passed, "result": _validation_to_dict(res)}
     finally:
         src.close()
@@ -296,6 +303,7 @@ def _h_test(args: Dict[str, Any]) -> Dict[str, Any]:
 def _h_test_count(args: Dict[str, Any]) -> Dict[str, Any]:
     from ..config.store import build_source_adapter, build_target_driver
     from ..validate.counts import run_test_count
+    from ..validate.util import effective_preserve_case
 
     cfg = _load_cfg(args)
     src = build_source_adapter(cfg)
@@ -304,7 +312,7 @@ def _h_test_count(args: Dict[str, Any]) -> Dict[str, Any]:
     tgt.connect()
     try:
         schema = src.introspect_schema(cfg.source.schema)
-        res = run_test_count(src, tgt, schema.tables, cfg.options.preserve_case)
+        res = run_test_count(src, tgt, schema.tables, effective_preserve_case(cfg, tgt))
         return {"ok": res.passed, "result": _validation_to_dict(res)}
     finally:
         src.close()
@@ -314,6 +322,7 @@ def _h_test_count(args: Dict[str, Any]) -> Dict[str, Any]:
 def _h_test_data(args: Dict[str, Any]) -> Dict[str, Any]:
     from ..config.store import build_source_adapter, build_target_driver
     from ..validate.data import run_test_data
+    from ..validate.util import effective_preserve_case
 
     cfg = _load_cfg(args)
     sample = int(args.get("sample", 1000))
@@ -324,9 +333,10 @@ def _h_test_data(args: Dict[str, Any]) -> Dict[str, Any]:
     results = []
     passed = True
     try:
+        pc = effective_preserve_case(cfg, tgt)
         for t in src.introspect_schema(cfg.source.schema).tables:
             res = run_test_data(src, tgt, t, sample_rows=sample,
-                                preserve_case=cfg.options.preserve_case)
+                                preserve_case=pc)
             results.append(_validation_to_dict(res))
             passed = passed and res.passed
         return {"ok": passed, "results": results}
@@ -386,7 +396,8 @@ def _h_resume(args: Dict[str, Any]) -> Dict[str, Any]:
         stats = run_migrate(
             src, tgt, schema=cfg.source.schema, registry=build_type_registry(cfg),
             drop_existing=False, preserve_case=cfg.options.preserve_case,
-            prefer_copy=cfg.options.prefer_copy, cfg=cfg, manifest_path=manifest_path,
+            batch_size=cfg.options.batch_size, prefer_copy=cfg.options.prefer_copy,
+            cfg=cfg, manifest_path=manifest_path,
             run_id=run_id, parallelism=cfg.options.parallelism, do_schema=False,
         )
         out = _stats_to_dict(stats)

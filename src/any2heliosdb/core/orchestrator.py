@@ -324,7 +324,8 @@ def migrate(
         loader = ResumableLoader(cfg, src, manifest_path, run_id, parallelism=parallelism,
                                  use_copy=use_copy, preserve_case=preserve_case,
                                  fresh=drop_existing,
-                                 concurrent_writes=caps.concurrent_writes)
+                                 concurrent_writes=caps.concurrent_writes,
+                                 batch_size=batch_size)
         ls = loader.run()
         by_fqn = {t.fqn: t.name for t in src.tables}
         for fqn, n in ls.rows.items():
