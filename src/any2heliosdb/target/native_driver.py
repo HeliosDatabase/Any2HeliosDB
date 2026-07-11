@@ -283,6 +283,48 @@ class NativeOracleDriver(TargetDriver):
                 cur.executemany(self._insert_sql(target_table, columns), values)
         return len(by_key)
 
+    def update_columns(
+        self,
+        target_table: str,
+        key_cols: Sequence[str],
+        set_cols: Sequence[str],
+        rows: Iterable[Sequence[object]],
+    ) -> int:
+        """Keyed column-subset UPDATE; returns the rows actually matched.
+
+        Each row is ``(*set-values, *key-values)`` in SQL order — the same order
+        as the ``:1..:n`` binds (SET columns first, then WHERE columns). Unlike
+        :meth:`upsert` (DELETE-by-key + INSERT of the provided columns, which NULLs
+        any omitted column), this writes *only* ``set_cols`` and leaves the rest of
+        the matched row intact, so an unchanged-TOAST partial image no longer
+        corrupts the row. Oracle's row count is rows *matched*, so a re-apply of
+        the same values still reports a match (no spurious insert fallback).
+        """
+        set_cols = list(set_cols)
+        key_cols = list(key_cols)
+        materialized = [tuple(r) for r in rows]
+        if not materialized or not set_cols:
+            return 0
+        bind_cols = set_cols + key_cols
+        set_clause = ", ".join(
+            "{} = :{}".format(oracle_ident(c), i + 1) for i, c in enumerate(set_cols))
+        where = " AND ".join(
+            "{} = :{}".format(oracle_ident(k), len(set_cols) + i + 1)
+            for i, k in enumerate(key_cols))
+        stmt = "UPDATE {} SET {} WHERE {}".format(_oq(target_table), set_clause, where)
+        updated = 0
+        with self.conn.cursor() as cur:
+            # Bind positions are structurally identical across rows, so force any
+            # datetime bind to TIMESTAMP once (see _bind_timestamps): r is already
+            # in bind order (set-values..., key-values...).
+            self._bind_timestamps(cur, bind_cols, materialized)
+            for r in materialized:
+                cur.execute(stmt, list(r))
+                if cur.rowcount and cur.rowcount > 0:
+                    updated += cur.rowcount
+        self.conn.commit()
+        return updated
+
     def delete_keys(
         self, target_table: str, key_cols: Sequence[str], keys: Iterable[Sequence[object]]
     ) -> int:
