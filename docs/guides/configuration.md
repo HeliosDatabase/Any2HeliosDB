@@ -13,12 +13,12 @@ and the optional `[data_type]`, `[modify_type]`, and `[capability]`.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `dialect` | string | `oracle` | `oracle` \| `mysql` \| `mssql`. Only `oracle` is validated; MySQL/MSSQL are [scaffolded](../migration/mysql-and-mssql.md). |
+| `dialect` | string | `oracle` | `oracle` \| `mysql` \| `postgresql` \| `mssql` — all four validated end-to-end (see the [README compatibility matrix](../../README.md#compatibility-matrix)). `postgresql` reads a PostgreSQL/HeliosDB server *out* (the migrate-back / PG-wire source); the wizard menu offers oracle/mysql/mssql, so hand-write `postgresql`. |
 | `host` | string | `127.0.0.1` | Source host. |
-| `port` | int | `1521` | Source port (Oracle 1521, MySQL 3306, MSSQL 1433). |
+| `port` | int | `1521` | Source port (Oracle 1521, MySQL 3306, PostgreSQL 5432, MSSQL 1433). |
 | `service_name` | string | — | **Oracle**: connect by service name (e.g. `XEPDB1`). |
 | `sid` | string | — | **Oracle**: connect by SID (alternative to `service_name`). |
-| `database` | string | — | **MySQL/MSSQL**: database name (used instead of `service_name`/`sid`). |
+| `database` | string | — | **MySQL / PostgreSQL / MSSQL**: database name (used instead of `service_name`/`sid`). |
 | `user` | string | `""` | Login user. Needs read on the `ALL_*` views + `SELECT` on the schema's tables. |
 | `password_env` | string | — | **Recommended.** Name of the env var holding the password (resolved at runtime). |
 | `password` | string | — | Literal password — dev convenience only; keep empty in committed configs. |
@@ -41,7 +41,7 @@ put it on `LD_LIBRARY_PATH`). The env vars `A2H_ORACLE_THICK=1` and
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `driver` | string | `psycopg` | `psycopg` (PG-wire, every edition, default) or `native` (Oracle-wire, experimental — see below). |
+| `driver` | string | `psycopg` | `psycopg` (PG-wire, every edition, default), `mysql` (MySQL-wire migrate-back sink), or `native` (Oracle-wire, experimental) — see [Driver selection](#driver-selection). |
 | `host` | string | `127.0.0.1` | HeliosDB host. |
 | `port` | int | `5432` | HeliosDB PG-wire port. |
 | `dbname` | string | `postgres` | Target database name. |
@@ -58,7 +58,7 @@ put it on `LD_LIBRARY_PATH`). The env vars `A2H_ORACLE_THICK=1` and
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `output_dir` | string | `./migration_output` | Holds the resume manifest (`manifest.db`, or `manifest.nano/` — see `manifest_backend`), the CDC registry `cdc.db`, and the per-extract `trail/`. |
-| `batch_size` | int | `1000` | Source fetch `arraysize`/`prefetchrows` and the INSERT-fallback batch size. |
+| `batch_size` | int | `1000` | Source fetch `arraysize`/`prefetchrows` and the INSERT-fallback batch size. Honored on the default resumable load **and** on `resume`. |
 | `parallelism` | int | `4` | Number of parallel load workers; the loader aims for ~`parallelism × 2` chunks per table. |
 | `prefer_copy` | bool | `true` | Use COPY when the target's probe reports `copy_from_stdin`; otherwise INSERT. |
 | `preserve_case` | bool | `false` | `false` lowercases all identifiers (Ora2Pg `PRESERVE_CASE` off) so they stay unquoted; `true` keeps source case (quoted). |
@@ -177,17 +177,23 @@ empty (you'll get an auth failure). A literal `password` is only consulted when
 ```toml
 [target]
 driver = "psycopg"     # default, validated, every edition
+# driver = "mysql"     # validated, MySQL-wire migrate-back / heterogeneous sink
 # driver = "native"    # experimental, Oracle-wire, Lite/Full only
 ```
 
-| | `psycopg` | `native` |
-|---|---|---|
-| Wire protocol | PostgreSQL | Oracle TNS (`oracledb`) |
-| Editions | Nano / Lite / Full | Lite / Full |
-| Bulk load | COPY (fast path) or INSERT | array INSERT (`executemany`) — no COPY |
-| Identifiers | lowercased (unless `preserve_case`) | source (upper) case, quoted |
-| Dialect translation | the **tool** translates Oracle→PG | **HeliosDB** translates (tool sends near-passthrough Oracle SQL) |
-| Status | **validated** | **experimental** — live parity test blocked on a HeliosDB Oracle-listener TNS-version handshake |
+| | `psycopg` | `mysql` | `native` |
+|---|---|---|---|
+| Wire protocol | PostgreSQL | MySQL (`PyMySQL`) | Oracle TNS (`oracledb`) |
+| Target | Nano / Lite / Full / stock PostgreSQL | a MySQL 8 server | Lite / Full (Oracle-wire) |
+| Bulk load | COPY (fast path) or INSERT | `INSERT … ON DUPLICATE KEY UPDATE` — no COPY | array INSERT (`executemany`) — no COPY |
+| Identifiers | lowercased (unless `preserve_case`) | backtick-quoted | source (upper) case, quoted |
+| Dialect translation | the **tool** translates the source dialect → PG | the **tool** translates → MySQL | **HeliosDB** translates (tool sends near-passthrough Oracle SQL) |
+| Status | **validated** | **validated** — heterogeneous / migrate-back (data flows *out* of HeliosDB, the GoldenGate-reverse direction) | **experimental** — live parity test blocked on a HeliosDB Oracle-listener TNS-version handshake |
+
+The `mysql` driver is the **migrate-back / heterogeneous** sink: it writes to a
+MySQL 8 server over the MySQL wire, so data can flow back *out* of HeliosDB (or
+straight Oracle → MySQL). It is validated as the sink for Oracle→MySQL and
+HeliosDB→MySQL (see [Worked examples, scenario 3](examples.md#scenario-3)).
 
 The `native` driver is the purest expression of the
 [design principle](../../README.md#design-principle-a-thin-translation-layer-over-a-runtime-probe)
