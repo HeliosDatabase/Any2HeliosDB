@@ -96,6 +96,11 @@ the translation. The table above therefore applies to the `psycopg` path; on
 
 The same engine ships mappers for MySQL, SQL Server, and PostgreSQL sources
 (`map_mysql_type`, `map_mssql_type`, `map_postgresql_type` in
-[`typemap/defaults.py`](../../src/any2heliosdb/typemap/defaults.py)). Those source
-adapters are scaffolded but **not yet validated** — see
-[MySQL & SQL Server](../migration/mysql-and-mssql.md).
+[`typemap/defaults.py`](../../src/any2heliosdb/typemap/defaults.py)). All three
+source adapters are **validated end-to-end** (see the
+[README compatibility matrix](../../README.md#compatibility-matrix)): the MySQL
+and SQL Server mappings are detailed in
+[MySQL & SQL Server](../migration/mysql-and-mssql.md), and PostgreSQL as a
+*source* is validated end-to-end (Pagila — see the
+[compatibility matrix](../../README.md#compatibility-matrix) and
+[examples](../guides/examples.md)).

@@ -69,9 +69,10 @@ a2h test-data  -c config.toml
   views may still need manual review (the migrate step warns, non-fatal).
 - **Column defaults**: only `CURRENT_TIMESTAMP` and numeric literals are replayed;
   string/expression defaults are skipped (the data carries the values).
-- **CDC**: change capture is Oracle-only today (SCN-watermark). MySQL **binlog**
-  (ROW + GTID) capture is on the [CDC roadmap](../cdc.md); the Extract → trail →
-  Replicat spine is source-agnostic, so it drops in there.
+- **CDC**: MySQL **binlog** change capture is implemented — log-based ROW-event
+  I/U/D (including deletes) via `mysql-replication` (`pip install -e ".[mysql-cdc]"`).
+  See [docs/cdc.md](../cdc.md) for the server prerequisites and the Extract → trail
+  → Replicat cycle.
 
 ## SQL Server → HeliosDB — validated ✅
 

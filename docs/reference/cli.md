@@ -44,6 +44,8 @@ copy-pasteable end-to-end walkthroughs see the
 | `extract` | Capture source changes into a named CDC trail. |
 | `replicat` | Apply a named trail to the target (idempotent). |
 | `extracts` | List registered CDC extracts and their capture/apply positions. |
+| `mcp serve` | Run the MCP server so AI agents can drive a2h remotely (Bearer auth + RBAC). |
+| `mcp auth` | Generate a Bearer token into a private (0600) token file. |
 
 ---
 
@@ -96,15 +98,29 @@ bookkeeping a run needs:
 ```
 <output_dir>/
   manifest.db          # resumable-load ledger (SQLite-WAL): runs, tables, chunks
+  manifest.nano/       # ...instead, when [options] manifest_backend = "nano"
+                       #    (an embedded HeliosDB-Nano/RocksDB directory, same ledger)
   cdc.db               # CDC registry: each extract's watermark + apply cursor
   trail/<name>/
-    trail.jsonl        # durable, append-only, fsync'd change records
-    binlog.pos         # MySQL-binlog source only: "<file>:<pos>" capture cursor
+    trail.jsonl        # durable, append-only, fsync'd change records (segment 0)
+    trail.00001.jsonl  # rotated segments when [cdc] trail_rotate_mb > 0
+    trail.meta         # purge bookkeeping (purged_lines) so the global cursor
+                       #    stays valid after --purge-applied
+    trail.lock         # advisory flock a replicat / --purge-applied run takes
+    dead_letter.jsonl  # poison records parked by the replicat (tier-2 policy)
+    binlog.pos         # log-based sources: MySQL "<file>:<pos>", or the mirrored
+                       #    PostgreSQL LSN (the slot is the real cursor) for display
+    epoch.id           # PostgreSQL logical only: "system_identifier:timeline_id"
+                       #    so a PITR/cluster swap fails closed instead of corrupting
 ```
 
-`status` / `resume` locate the same `manifest.db` + a deterministic `run_id`
-derived from the source→target coordinates, so they always find the ledger the
-`migrate` that created it wrote.
+`status` / `resume` locate the same manifest (`manifest.db`, or the `manifest.nano`
+directory) + a deterministic `run_id` derived from the source→target coordinates,
+so they always find the ledger the `migrate` that created it wrote. The backend is
+auto-detected on read (file ⇒ sqlite, directory ⇒ nano), so no extra flag is
+needed. Each artifact is created on first use of its subsystem — `manifest.db`/
+`manifest.nano` by the first `migrate`/`load`, `cdc.db` by the first CDC verb,
+and each `trail/<name>/` artifact once the relevant feature is exercised.
 
 ### Supported source dialects × target drivers
 
@@ -125,7 +141,7 @@ reaches the destination.
 | `mysql` | MySQL (PyMySQL) | — (a MySQL 8 server) | **validated** heterogeneous / migrate-back sink — `INSERT … ON DUPLICATE KEY UPDATE`, no COPY. |
 | `native` | Oracle TNS (`oracledb`) | Lite / Full | **experimental** — HeliosDB does the dialect translation; live parity test blocked on a TNS handshake fix. Oracle source only; selecting it with a non-Oracle source raises a config error. |
 
-See the [README compatibility matrix](../README.md#compatibility-matrix) for the
+See the [README compatibility matrix](../../README.md#compatibility-matrix) for the
 per-edition validation status and minimum HeliosDB builds.
 
 ---
@@ -688,7 +704,7 @@ are skipped with a warning.
 
 **Prints.** `replicat NAME: applied <n> change(s), deleted <d>, from <r> read;
 cursor=<c>`, plus warnings (e.g. PK-less tables skipped). If any record was parked
-by the [poison policy](../cdc.md#poison-record-policy-poison_retries) it also
+by the [poison policy](../cdc.md#poison-record-policy-poison_retries--poison_max_per_run) it also
 prints `dead-lettered <n> poison record(s)`.
 
 ```
@@ -740,6 +756,72 @@ Prints `no extracts registered` when the registry is empty.
 
 ---
 
+## MCP server (AI-agent remote administration)
+
+The `mcp` command group runs an MCP (Model Context Protocol) server that exposes
+the a2h engine as MCP **tools**, so an AI agent can assess / migrate / validate /
+resume / run CDC remotely with Bearer-token auth + RBAC. Full protocol, tool
+catalog, and RBAC matrix: [docs/mcp.md](../mcp.md).
+
+### `a2h mcp serve`
+
+```bash
+a2h mcp serve [--transport http|stdio] [--host H] [--port P] \
+              [--tokens TOK] [--tokens-file FILE] [--stdio-role ROLE]
+```
+
+**Purpose.** Start the MCP server. `http` (default) serves JSON-RPC 2.0 at
+`POST /mcp` (streamable HTTP; `GET /mcp` opens the SSE channel) with an
+unauthenticated liveness probe at `GET /healthz`; `stdio` is a trusted local
+launch for an agent that spawns the server as a subprocess.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `--transport` | `http` | `http` (remote, Bearer-auth) or `stdio` (local, newline-delimited JSON-RPC on stdin/stdout). |
+| `--host` | `127.0.0.1` | Bind address (HTTP transport). Use `0.0.0.0` to accept remote agents. |
+| `--port` | `8080` | Bind port (HTTP transport). |
+| `--tokens` | — | `token:role[,token:role…]` inline (else `$A2H_MCP_TOKENS`). Roles: `viewer` \| `operator` \| `admin`. |
+| `--tokens-file` | — | Path to a `token:role`-per-line file (else `$A2H_MCP_TOKENS_FILE`). The file wins over the env var on a clash. |
+| `--stdio-role` | `admin` | Role granted to the local stdio caller (stdio has no Bearer check). |
+
+**Notes.** The HTTP transport **refuses to start with zero tokens** (it would be
+an open relay); generate one with `a2h mcp auth`. The server is a built-in,
+wire-compatible JSON-RPC endpoint on every Python version (stdlib only — no
+extra dependency to run it); whether the official `mcp` SDK is importable is
+reported informationally in the banner/`sdk_path`, but the serving path does
+not use it.
+
+**Prints.** A one-line banner (`… (http) on http://H:P/mcp`, or on stderr for
+stdio so stdout stays the JSON-RPC channel), then serves until interrupted.
+
+**Exit codes.** Runs until `Ctrl-C` (`stopped`); `1` on a startup error (e.g. no
+tokens for HTTP).
+
+### `a2h mcp auth`
+
+```bash
+a2h mcp auth [--role viewer|operator|admin] [--file FILE] [--rotate] [--show]
+```
+
+**Purpose.** Generate a cryptographically-strong Bearer token and store it in a
+private (`0600`) token file — the same file `mcp serve --tokens-file` reads, so
+the secret stays off the command line and out of the project config.
+
+| Option | Default | Purpose |
+|---|---|---|
+| `-r`, `--role` | `admin` | Role the token grants: `viewer` \| `operator` \| `admin`. An unknown role errors. |
+| `-f`, `--file` | `$A2H_MCP_TOKENS_FILE` else `~/.config/a2h/mcp-tokens` | Token file to write. |
+| `--rotate` | off | Replace the file's contents instead of appending a new token. |
+| `--show` | off | Also print the raw token (otherwise it stays only in the file). |
+
+**Prints.** Confirmation of the role/path/mode, the token **fingerprint** (never
+the raw token unless `--show`), and the `mcp serve` + client `Authorization:
+Bearer` lines to copy. Clients read the token as the first `:`-field of a line.
+
+**Exit codes.** `0` on success; `1` on an unknown role.
+
+---
+
 ## Exit codes (summary)
 
 | Code | Meaning |
@@ -755,5 +837,7 @@ Prints `no extracts registered` when the registry is empty.
 - [Configuration](../guides/configuration.md) — every `config.toml` field.
 - [Getting started](../guides/getting-started.md) — install → first migration.
 - [CDC](../cdc.md) — the Extract → trail → Replicat model in depth.
+- [CDC operations runbook](../guides/cdc-operations.md) — scheduling, lag, trail retention, dead-letter triage, recovery.
+- [MCP server](../mcp.md) — the tool catalog, auth, and RBAC for the `mcp` group.
 - [Type mapping](type-mapping.md) — the source→HeliosDB type tables + overrides.
 - [docs/README.md](../README.md) — the documentation index.

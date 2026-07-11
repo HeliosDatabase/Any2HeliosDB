@@ -52,9 +52,18 @@ pip install any2heliosdb[oracle]    # + Oracle source (oracledb)
 
 The `psycopg` PG-wire target is in core, so a source driver is the only extra you
 usually need: `[oracle]` (oracledb), `[mysql]` (PyMySQL; `[mysql-cdc]` adds binlog
-CDC), `[mssql]` (pyodbc + an ODBC driver), `[mcp]` (the MCP server SDK), or
-`[all]`. Python 3.9+; core deps are light (`psycopg[binary]`, `typer`, `rich`,
-`jinja2`, `tomli`/`tomli-w`). Verify your environment with `a2h doctor`.
+CDC), `[mssql]` (pyodbc + an ODBC driver), `[mcp]` (the MCP server SDK),
+`[nano-manifest]` (run the resumable-load ledger on embedded HeliosDB-Nano — the
+[`manifest_backend = "nano"`](docs/guides/configuration.md#manifest_backend--sqlite-vs-embedded-nano)
+option), or `[all]`. Python 3.9+; core deps are light (`psycopg[binary]`, `typer`,
+`rich`, `jinja2`, `tomli`/`tomli-w`). Verify your environment with `a2h doctor`.
+
+> **PyPI caveat.** The `nano-manifest` extra (and therefore `[all]`) pulls
+> `heliosdb-nano-embedded`, which is **not yet published to PyPI**, so
+> `pip install any2heliosdb[nano-manifest]` / `[all]` cannot resolve from PyPI
+> today. Install that wheel out-of-band (or from a local index) first, or stay on
+> the default `manifest_backend = "sqlite"` (stdlib, zero extra deps). Every other
+> extra installs cleanly from PyPI.
 
 > Developing on a checkout? Use an editable install instead:
 > `pip install -e ".[all,dev]"`.
@@ -97,8 +106,9 @@ a2h extracts      -c config.toml   # list extracts + capture/apply positions
 ```
 
 Oracle capture is **SCN-watermark** — a full snapshot on the first cycle, then
-incremental (`ORA_ROWSCN`) after. **MySQL** capture is **log-based binlog** (real
-I/U/D, including deletes). Apply is an idempotent upsert
+incremental (`ORA_ROWSCN`) after. **MySQL** capture is **log-based binlog** and
+**PostgreSQL** capture is **log-based logical decoding** (`test_decoding`) — both
+real I/U/D, including deletes. Apply is an idempotent upsert
 (`INSERT … ON CONFLICT … DO UPDATE`), so re-running a trail slice never
 duplicates. Oracle LogMiner and SQL Server CDC are on the
 [roadmap](docs/cdc.md), built on the same Extract → trail → Replicat spine, and
@@ -141,8 +151,9 @@ edition-agnostic, as for the other sources.) Needs `pip install -e ".[mssql]"`
 MySQL→HeliosDB is validated end-to-end (migrate + `test`/`test-count`/`test-data`)
 on all three editions: `information_schema` introspection, `TINYINT(1)`→`BOOLEAN`,
 `''` preserved (MySQL doesn't fold it to NULL), BLOB/unicode intact. CDC capture
-is Oracle-only (SCN-watermark) plus **MySQL binlog** (log-based, real I/U/D); other
-sources' log-based CDC is [roadmap](docs/cdc.md).
+covers **Oracle** (SCN-watermark), **MySQL binlog**, and **PostgreSQL logical
+decoding** — all real I/U/D (incl. deletes) except the idempotent Oracle watermark
+scan; Oracle LogMiner and SQL Server CDC remain [roadmap](docs/cdc.md).
 
 Minimum HeliosDB build per edition (full details in
 [docs/heliosdb-compatibility.md](docs/heliosdb-compatibility.md)):
@@ -203,7 +214,9 @@ When **HeliosDB is the source**, its PG-wire catalog exposes no PK/FK/index
 metadata and no column precision/scale today, so chunking falls back to a single
 chunk and `test-data` self-handles the PK-less case — **`test-count` (row parity)
 is the gate** for migrate-back; the tool works around the missing catalog
-metadata. SQL Server remains scaffolded.
+metadata. (A SQL Server *sink* — migrate-back *into* SQL Server — is not
+implemented; the heterogeneous target drivers are `psycopg` and `mysql`. SQL
+Server as a *source* is validated, per the matrix above.)
 
 ---
 
@@ -222,7 +235,7 @@ metadata. SQL Server remains scaffolded.
   load is array `INSERT` (no COPY). Code-complete and unit-tested; live
   validation pending a HeliosDB TNS-version fix.
 
-Pick the driver in `[target].driver` (`"psycopg"` or `"native"`); see
+Pick the driver in `[target].driver` (`"psycopg"`, `"mysql"`, or `"native"`); see
 [configuration](docs/guides/configuration.md#driver-selection).
 
 ---
