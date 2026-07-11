@@ -656,7 +656,7 @@ are skipped with a warning.
 
 | Option | Default | Purpose |
 |---|---|---|
-| `--reconcile-deletes` / `--no-deletes` | **`--reconcile-deletes` (on)** | Reconcile deletes via a source/target key-set diff: target rows whose PK is absent from the source's current key set are removed (a full O(keys) pass). Use `--no-deletes` for apply-only — which is what you want for the **MySQL binlog** source, since the binlog already carries explicit `D` records. |
+| `--reconcile-deletes` / `--no-deletes` | **mode-aware**: on for the Oracle SCN source, off for the log-based sources (MySQL binlog, PostgreSQL logical) | Reconcile deletes via a source/target key-set diff: target rows whose PK is absent from the source's current key set are removed (a full O(keys) pass). The Oracle SCN source emits no delete events, so reconciliation defaults ON there; the log-based sources already carry explicit `D` records, so it defaults OFF (reconciling against the *live* source key set can also race a not-yet-applied PK-changing UPDATE and delete its old-key row ahead of the move). Passing either flag explicitly overrides the default for any source. |
 
 **Prints.** `replicat NAME: applied <n> change(s), deleted <d>, from <r> read;
 cursor=<c>`, plus warnings (e.g. PK-less tables skipped).

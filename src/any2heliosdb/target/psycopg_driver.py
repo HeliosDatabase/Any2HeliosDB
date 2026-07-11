@@ -265,6 +265,46 @@ class PsycopgDriver(TargetDriver):
                         table, col_list, vals, conflict, action))
         return len(by_key)
 
+    def update_columns(
+        self,
+        target_table: str,
+        key_cols: Sequence[str],
+        set_cols: Sequence[str],
+        rows: Iterable[Sequence[object]],
+    ) -> int:
+        """Keyed column-subset UPDATE; returns the rows actually matched.
+
+        Rendered as literal SQL for the same reason as :meth:`upsert` /
+        :meth:`delete_keys` (parameterized WHERE/SET values match nothing on
+        HeliosDB-Lite). Each row is ``(*set-values, *key-values)`` in SQL order.
+        Only ``set_cols`` are written, so an omitted (e.g. unchanged-TOAST) column
+        keeps its stored value — the key correctness gain over ``upsert`` on the
+        DELETE+INSERT drivers.
+        """
+        from psycopg import sql
+
+        set_cols = list(set_cols)
+        materialized = [tuple(r) for r in rows]
+        if not materialized or not set_cols:
+            return 0
+        nset = len(set_cols)
+        table = sql.SQL(quote_table(target_table))
+        updated = 0
+        with self.conn.transaction():
+            with self.conn.cursor() as cur:
+                for r in materialized:
+                    setvals, keyvals = r[:nset], r[nset:]
+                    sets = sql.SQL(", ").join(
+                        sql.SQL("{} = {}").format(sql.Identifier(c), sql.Literal(v))
+                        for c, v in zip(set_cols, setvals))
+                    conds = sql.SQL(" AND ").join(
+                        sql.SQL("{} = {}").format(sql.Identifier(kc), sql.Literal(v))
+                        for kc, v in zip(key_cols, keyvals))
+                    cur.execute(sql.SQL("UPDATE {} SET {} WHERE {}").format(table, sets, conds))
+                    if cur.rowcount and cur.rowcount > 0:
+                        updated += cur.rowcount
+        return updated
+
     def delete_keys(
         self, target_table: str, key_cols: Sequence[str], keys: Iterable[Sequence[object]]
     ) -> int:

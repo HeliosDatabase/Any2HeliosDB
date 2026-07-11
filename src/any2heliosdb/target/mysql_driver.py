@@ -44,13 +44,23 @@ class MySQLTargetDriver(TargetDriver):
     # --- lifecycle -------------------------------------------------------
     def connect(self) -> None:
         import pymysql  # lazy
+        from pymysql.constants import CLIENT
 
         try:
             self._conn = pymysql.connect(
                 host=self.dsn.host, port=self.dsn.port, user=self.dsn.user,
                 password=self.dsn.password or "", database=self.dsn.dbname or None,
                 charset="utf8mb4", autocommit=True,
-                connect_timeout=self.dsn.connect_timeout)
+                connect_timeout=self.dsn.connect_timeout,
+                # CLIENT_FOUND_ROWS makes an UPDATE's affected-row count report rows
+                # *matched* rather than rows *changed*, so update_columns honours the
+                # TargetDriver contract ("rows actually matched") on every driver. The
+                # CDC keymove apply relies on that matched count as an existence probe:
+                # a pure primary-key change leaves the other columns unchanged, and
+                # without FOUND_ROWS such a no-op UPDATE would report 0 and be misread
+                # as "row absent". Only update_columns reads rowcount for correctness;
+                # the bulk/delete seams return their own materialized counts.
+                client_flag=CLIENT.FOUND_ROWS)
         except Exception as e:  # noqa: BLE001
             raise TargetConnectionError(
                 "could not connect to MySQL at {}:{} as {}: {}".format(
@@ -222,6 +232,42 @@ class MySQLTargetDriver(TargetDriver):
             cur.executemany(sql, list(by_key.values()))
         self.conn.commit()
         return len(by_key)
+
+    def update_columns(
+        self,
+        target_table: str,
+        key_cols: Sequence[str],
+        set_cols: Sequence[str],
+        rows: Iterable[Sequence[object]],
+    ) -> int:
+        """Keyed column-subset UPDATE; returns the rows actually matched.
+
+        Each row is ``(*set-values, *key-values)`` in SQL order. Only ``set_cols``
+        are written, leaving every omitted column of the matched row untouched —
+        so this never NULLs an unchanged-TOAST column the way ``upsert`` (which is
+        an ``INSERT ... ON DUPLICATE KEY UPDATE`` merge, preserving omitted columns
+        on a conflict but defaulting them on a fresh insert) could on a subset
+        image. The connection sets ``CLIENT_FOUND_ROWS`` (see :meth:`connect`), so
+        the returned count is rows *matched*, not rows *changed*: a value-unchanged
+        re-apply still reports the match, which the CDC keymove apply needs as a
+        reliable existence probe.
+        """
+        set_cols = list(set_cols)
+        materialized = [tuple(r) for r in rows]
+        if not materialized or not set_cols:
+            return 0
+        set_clause = ", ".join("{} = %s".format(mysql_ident(c)) for c in set_cols)
+        where = " AND ".join("{} = %s".format(mysql_ident(k)) for k in key_cols)
+        stmt = "UPDATE {} SET {} WHERE {}".format(_mq(target_table), set_clause, where)
+        updated = 0
+        with self.conn.cursor() as cur:
+            for r in materialized:
+                # r is already (set-values..., key-values...) == the bind order.
+                cur.execute(stmt, list(r))
+                if cur.rowcount and cur.rowcount > 0:
+                    updated += cur.rowcount
+        self.conn.commit()
+        return updated
 
     def delete_keys(
         self, target_table: str, key_cols: Sequence[str], keys: Iterable[Sequence[object]]

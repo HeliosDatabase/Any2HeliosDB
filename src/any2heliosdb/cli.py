@@ -395,9 +395,13 @@ def extract(name: str = typer.Argument(..., help="Extract (capture process) name
 @app.command()
 def replicat(name: str = typer.Argument(..., help="Replicat (apply process) name."),
              config: str = CONFIG_OPT,
-             reconcile_deletes: bool = typer.Option(
-                 True, "--reconcile-deletes/--no-deletes",
-                 help="Reconcile deletes via a source/target key-set diff (v1; off = apply-only).")) -> None:
+             reconcile_deletes: Optional[bool] = typer.Option(
+                 None, "--reconcile-deletes/--no-deletes",
+                 help="Reconcile deletes via a source/target key-set diff. Default is "
+                      "mode-aware: ON for the Oracle SCN source (no delete events), OFF "
+                      "for log-based sources (MySQL binlog / PG logical carry explicit "
+                      "deletes; reconcile there is redundant and races a keymove). "
+                      "--reconcile-deletes forces it on; --no-deletes forces it off.")) -> None:
     """Apply captured changes from the named trail to the target (idempotent)."""
     from .cdc.engine import run_replicat
     from .config.store import load_config

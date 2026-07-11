@@ -88,6 +88,54 @@ def test_upsert_dedups_by_key_last_wins():
     assert ins[2] == [(1, "new"), (2, "x")]  # last write for key 1 wins
 
 
+class _RowcountCursor(FakeCursor):
+    """FakeCursor that exposes a settable rowcount and a no-op setinputsizes, so
+    update_columns (which reads cur.rowcount after each single-row execute) works
+    without a live Oracle listener."""
+
+    def __init__(self, conn, rc=1):
+        super().__init__(conn)
+        self.rowcount = rc
+
+    def setinputsizes(self, *a, **k):
+        pass
+
+
+def test_update_columns_sets_only_provided_columns_oracle_style():
+    # F1: a partial (unchanged-TOAST) image applies as UPDATE SET <provided> WHERE
+    # <key>. The omitted column (BODY) is never named, so the DELETE+INSERT upsert
+    # that would NULL it is avoided — the stored value survives.
+    d = _drv()
+    d._conn.cursor = lambda: _RowcountCursor(d._conn, rc=1)
+    n = d.update_columns("DOC", ["ID"], ["V"], [("new-v", 5)])
+    assert n == 1
+    kind, sql, params = d._conn.log[-1]
+    assert kind == "execute"
+    assert sql == 'UPDATE "DOC" SET "V" = :1 WHERE "ID" = :2'
+    assert params == ["new-v", 5]
+    assert '"BODY"' not in sql
+    assert d._conn.commits == 1
+
+
+def test_update_columns_can_move_primary_key_in_one_statement():
+    # F2: a PK-changing UPDATE moves the row in place — SET the new key + provided
+    # columns WHERE the OLD key — instead of deleting the parent row first.
+    d = _drv()
+    d._conn.cursor = lambda: _RowcountCursor(d._conn, rc=1)
+    n = d.update_columns("DOC", ["ID"], ["ID", "V"], [(12, "moved", 11)])
+    assert n == 1
+    _, sql, params = d._conn.log[-1]
+    assert sql == 'UPDATE "DOC" SET "ID" = :1, "V" = :2 WHERE "ID" = :3'
+    assert params == [12, "moved", 11]
+
+
+def test_update_columns_returns_zero_when_no_row_matches():
+    # rowcount==0 signals the replicat to fall back to an insert.
+    d = _drv()
+    d._conn.cursor = lambda: _RowcountCursor(d._conn, rc=0)
+    assert d.update_columns("DOC", ["ID"], ["V"], [("x", 99)]) == 0
+
+
 def test_delete_keys_oracle_binds():
     d = _drv()
     n = d.delete_keys("EMPLOYEES", ["EMP_ID"], [(1,), (2,)])
