@@ -35,6 +35,12 @@ class SourceDsn:
     thick: bool = False
     client_dir: Optional[str] = None
     sysdba: bool = False
+    # Seconds to wait to ESTABLISH the source connection before failing. Bounds a
+    # firewalled/unreachable source so ``assess``/``migrate`` fail fast instead of
+    # hanging forever. Threaded into each driver's own connect-timeout parameter
+    # (oracledb ``tcp_connect_timeout``, pymysql ``connect_timeout``, psycopg
+    # ``connect_timeout``, pyodbc ``timeout`` = SQL_ATTR_LOGIN_TIMEOUT).
+    connect_timeout: int = 10
 
 
 class SourceAdapter(abc.ABC):

@@ -26,6 +26,7 @@ and the optional `[data_type]`, `[modify_type]`, and `[capability]`.
 | `thick` | bool | `false` | **Oracle**: use python-oracledb **thick mode** (Oracle Instant Client). Default is **thin mode** — pure-Python, no client, no external deps. Enable only for servers that mandate **Native Network Encryption** (thin mode can't do NNE → `DPY-3001`). |
 | `client_dir` | string | — | **Oracle** (thick): Instant Client lib directory. Omit to find it via `PATH` / `LD_LIBRARY_PATH`. |
 | `sysdba` | bool | `false` | **Oracle**: connect with SYSDBA privilege (required for the `SYS` user). |
+| `connect_timeout` | int | `10` | Seconds to wait to **establish** the source connection before failing — bounds a firewalled/unreachable source so `assess`/`migrate` fail fast instead of hanging forever. Threaded into each driver's own parameter: oracledb `tcp_connect_timeout`, pymysql `connect_timeout`, psycopg `connect_timeout`, pyodbc `timeout` (= `SQL_ATTR_LOGIN_TIMEOUT`). |
 
 For Oracle, set exactly one of `service_name` or `sid`. The DSN built is
 `host:port/service_name`, or `makedsn(host, port, sid=…)`, or bare `host:port`.
@@ -49,9 +50,7 @@ put it on `LD_LIBRARY_PATH`). The env vars `A2H_ORACLE_THICK=1` and
 | `password_env` | string | — | Env var with the target password; omit for a **trust** target. |
 | `password` | string | — | Literal password (dev only). |
 | `sslmode` | string | — | e.g. `require`. Omitted when unset. |
-
-> A connection timeout of 10s applies to the target by default
-> (`TargetDsn.connect_timeout`).
+| `connect_timeout` | int | `10` | Seconds to wait to **establish** the target connection before failing (psycopg `connect_timeout`; the native Oracle-wire driver's `tcp_connect_timeout`). |
 
 ## `[options]`
 
@@ -59,11 +58,13 @@ put it on `LD_LIBRARY_PATH`). The env vars `A2H_ORACLE_THICK=1` and
 |---|---|---|---|
 | `output_dir` | string | `./migration_output` | Holds the resume manifest (`manifest.db`, or `manifest.nano/` — see `manifest_backend`), the CDC registry `cdc.db`, and the per-extract `trail/`. |
 | `batch_size` | int | `1000` | Source fetch `arraysize`/`prefetchrows` and the INSERT-fallback batch size. Honored on the default resumable load **and** on `resume`. |
-| `parallelism` | int | `4` | Number of parallel load workers; the loader aims for ~`parallelism × 2` chunks per table. |
+| `parallelism` | int | `4` | Number of parallel load workers; the loader aims for ~`parallelism × chunks_per_worker` chunks per table. |
+| `chunks_per_worker` | int | `2` | Target PK-range chunks **per worker**: the loader splits each table into ~`parallelism × chunks_per_worker` chunks. More chunks smooth per-worker skew (one big chunk finishing last) at the cost of more chunk bookkeeping. **Plan-affecting**: it joins the loader's config hash, so changing it resets the run rather than replaying a stale chunk plan (contrast `batch_size`, which does not). |
 | `prefer_copy` | bool | `true` | Use COPY when the target's probe reports `copy_from_stdin`; otherwise INSERT. |
 | `preserve_case` | bool | `false` | `false` lowercases all identifiers (Ora2Pg `PRESERVE_CASE` off) so they stay unquoted; `true` keeps source case (quoted). |
 | `drop_existing` | bool | `true` | `DROP TABLE … CASCADE` before re-creating on `migrate` (ignored by `resume`). |
 | `manifest_backend` | string | `sqlite` | Resumable-load ledger store: `sqlite` (stdlib, zero-friction default) or `nano` (embedded HeliosDB-Nano, in-process). See below. |
+| `native_call_timeout_ms` | int | `300000` | **Native (Oracle-wire) target only.** Per-round-trip `call_timeout` (milliseconds) on the oracledb connection — a generous safety net so a bulk array-INSERT never blocks forever on a stalled HeliosDB TTC response. Unused by the psycopg/PG-wire path. (The short close-handshake wait stays a fixed internal bound: by close time the data is already committed, so there is nothing to tune.) |
 
 ### `manifest_backend` — SQLite vs embedded Nano
 
@@ -205,11 +206,15 @@ source raises a config error.
 ## Tuning
 
 - **`parallelism`** — raise for wide PK ranges and a target that handles
-  concurrent transactions (Full); the loader makes ~`parallelism × 2` chunks per
-  table. On **Lite**, concurrent transactions are rejected today, so chunks may
-  fail under contention and are then re-run by the automatic **serial-retry**
-  pass — the load still converges. There is no benefit to a high `parallelism` on
-  Lite; `1` avoids the wasted parallel attempt.
+  concurrent transactions (Full); the loader makes ~`parallelism × chunks_per_worker`
+  chunks per table. On **Lite**, concurrent transactions are rejected today, so
+  chunks may fail under contention and are then re-run by the automatic
+  **serial-retry** pass — the load still converges. There is no benefit to a high
+  `parallelism` on Lite; `1` avoids the wasted parallel attempt.
+- **`chunks_per_worker`** — chunks per worker (default `2`); more chunks smooth
+  per-worker skew but add bookkeeping. Because it sets the chunk **count**, it is
+  plan-affecting — changing it across a `resume` resets the run (re-plans from
+  scratch) rather than replaying the old plan.
 - **`prefer_copy`** — leave `true`. The probe disables COPY automatically where the
   target lacks it (Nano), falling back to INSERT. Set `false` only to force INSERT
   for debugging.

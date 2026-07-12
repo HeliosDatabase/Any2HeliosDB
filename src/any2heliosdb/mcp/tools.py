@@ -351,6 +351,50 @@ def _h_test_data(args: Dict[str, Any]) -> Dict[str, Any]:
         tgt.close()
 
 
+def _h_test_index(args: Dict[str, Any]) -> Dict[str, Any]:
+    from ..config.store import build_source_adapter, build_target_driver
+    from ..validate.data import run_test_index
+    from ..validate.util import effective_preserve_case
+
+    cfg = _load_cfg(args)
+    src = build_source_adapter(cfg)
+    tgt = build_target_driver(cfg)
+    src.connect()
+    tgt.connect()
+    results = []
+    passed = True
+    try:
+        pc = effective_preserve_case(cfg, tgt)
+        # The source schema supplies the FK metadata; the probe runs on the target.
+        for t in src.introspect_schema(cfg.source.schema).tables:
+            res = run_test_index(tgt, t, preserve_case=pc)
+            results.append(_validation_to_dict(res))
+            passed = passed and res.passed
+        return {"ok": passed, "results": results}
+    finally:
+        src.close()
+        tgt.close()
+
+
+def _h_export(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Render the source schema to target DDL and return the TEXT (never writes a
+    server-side file — agents want the string). ``review_sql`` is the verbatim
+    procedural source for manual porting, or null when there is nothing to review."""
+    from ..config.store import build_source_adapter
+    from ..core.export import build_ddl
+    from ..plsql.procedural import render_review
+
+    cfg = _load_cfg(args)
+    src = build_source_adapter(cfg)
+    src.connect()
+    try:
+        schema = src.introspect_schema(cfg.source.schema)
+        review = render_review(schema)
+        return {"ok": True, "ddl": build_ddl(cfg, schema), "review_sql": review or None}
+    finally:
+        src.close()
+
+
 # Operator (write) ------------------------------------------------------------
 def _h_migrate(args: Dict[str, Any]) -> Dict[str, Any]:
     from ..config.store import (build_source_adapter, build_target_driver,
@@ -376,6 +420,7 @@ def _h_migrate(args: Dict[str, Any]) -> Dict[str, Any]:
             batch_size=cfg.options.batch_size, prefer_copy=cfg.options.prefer_copy,
             cfg=cfg, manifest_path=manifest_path, run_id=run_id,
             parallelism=cfg.options.parallelism,
+            chunks_per_worker=cfg.options.chunks_per_worker,
         )
         out = _stats_to_dict(stats)
         out["run_id"] = run_id
@@ -404,7 +449,8 @@ def _h_resume(args: Dict[str, Any]) -> Dict[str, Any]:
             drop_existing=False, preserve_case=cfg.options.preserve_case,
             batch_size=cfg.options.batch_size, prefer_copy=cfg.options.prefer_copy,
             cfg=cfg, manifest_path=manifest_path,
-            run_id=run_id, parallelism=cfg.options.parallelism, do_schema=False,
+            run_id=run_id, parallelism=cfg.options.parallelism,
+            chunks_per_worker=cfg.options.chunks_per_worker, do_schema=False,
         )
         out = _stats_to_dict(stats)
         out["run_id"] = run_id
@@ -520,6 +566,14 @@ def build_catalog() -> "ToolRegistry":
     reg.add(Tool("test_data", Role.VIEWER,
                  "TEST_DATA: ordered, sampled row comparison + checksums.",
                  _h_test_data, properties=sample_props))
+    reg.add(Tool("test_index", Role.VIEWER,
+                 "TEST_INDEX: target-side FK-index sanity (catches a stale/unbackfilled "
+                 "FK index).",
+                 _h_test_index, properties=dict(cfg_props)))
+    reg.add(Tool("export", Role.VIEWER,
+                 "Render the source schema to target DDL; returns the DDL text plus the "
+                 "procedural review SQL (does not write server-side files).",
+                 _h_export, properties=dict(cfg_props)))
     reg.add(Tool("list_config", Role.VIEWER,
                  "Echo the resolved config (passwords redacted).",
                  _h_list_config, properties=dict(cfg_props)))

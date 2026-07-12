@@ -4,7 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "any2heliosdb"
-version = "1.4.0"
+# Single-sourced from src/any2heliosdb/__init__.py::__version__ (see
+# [tool.hatch.version]) so the wheel metadata and the runtime-reported version can
+# never disagree; the CI release step asserts the built version == the release tag.
+dynamic = ["version"]
 description = "Migrate Oracle / MySQL / PostgreSQL / SQL Server into HeliosDB or stock PostgreSQL — a modern, Python successor to Ora2Pg."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -65,6 +68,10 @@ dev = ["pytest>=7", "pytest-cov", "ruff", "mypy"]
 [project.scripts]
 a2h = "any2heliosdb.cli:main"
 any2heliosdb = "any2heliosdb.cli:main"
+
+[tool.hatch.version]
+# The one source of truth for the version: __version__ in the package __init__.
+path = "src/any2heliosdb/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/any2heliosdb"]
