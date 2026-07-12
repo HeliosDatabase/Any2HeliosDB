@@ -128,6 +128,8 @@ error** (JSON-RPC code `-32001`, `data.status = 403`).
 | `test` | viewer | `validate.structure.run_test` |
 | `test_count` | viewer | `validate.counts.run_test_count` |
 | `test_data` | viewer | `validate.data.run_test_data` |
+| `test_index` | viewer | `validate.data.run_test_index` |
+| `export` | viewer | `core.export.build_ddl` (+ `plsql.procedural.render_review`) |
 | `list_config` | viewer | resolved config, passwords redacted |
 | `validate_config` | viewer | config loads + runtime objects build (no I/O) |
 | `migrate` | operator | `core.orchestrator.migrate` |
@@ -141,7 +143,7 @@ Role → permitted-tool matrix:
 
 | Role | Permitted tools |
 | --- | --- |
-| **viewer** | doctor, smoke_test, assess, status, extracts, test, test_count, test_data, list_config, validate_config |
+| **viewer** | doctor, smoke_test, assess, status, extracts, test, test_count, test_data, test_index, export, list_config, validate_config |
 | **operator** | *(all viewer)* + migrate, load, resume |
 | **admin** | *(all operator)* + extract, replicat, wizard |
 
@@ -168,6 +170,25 @@ config (the same `[source]` / `[target]` / `[options]` blocks, plus optional
 Tool-specific arguments: `migrate`/`load` accept `parallelism`, `batch_size`,
 `drop_existing`; `test_data` accepts `sample`; `extract`/`replicat` require
 `name` (`replicat` also accepts `reconcile_deletes`); `wizard` accepts `output`.
+`export` and `test_index` take only the config (path or inline). `export`
+returns the entire DDL (and `.review.sql` companion) as text in one
+response — for very large schemas (thousands of tables) expect a
+multi-megabyte JSON-RPC body; there is deliberately no truncation. Note
+`chunks_per_worker`, `native_call_timeout_ms`, and the source/target
+`connect_timeout` are set via the inline `options`/`source`/`target` blocks (the
+same keys `config.toml` uses); `migrate` honours whatever the resolved config
+carries.
+
+Unlike the CLI `a2h export` (which writes `schema.sql` + `schema.review.sql`), the
+`export` tool **returns the DDL text** so an agent can consume it directly:
+
+```jsonc
+// export result (structuredContent)
+{ "ok": true,
+  "ddl": "CREATE TABLE employees (...);\n\nCREATE SEQUENCE ...",
+  "review_sql": "-- a2h review file: ...\n"   // null when nothing procedural to port
+}
+```
 
 ## Result shape
 

@@ -75,7 +75,9 @@ class MySQLAdapter(SourceAdapter):
             self._conn = pymysql.connect(
                 host=self.dsn.host, port=self.dsn.port, user=self.dsn.user,
                 password=self.dsn.password, database=self._db() or None,
-                charset="utf8mb4", autocommit=True)
+                charset="utf8mb4", autocommit=True,
+                # Bound the TCP connect wait so a firewalled source fails fast.
+                connect_timeout=self.dsn.connect_timeout)
             with self._conn.cursor() as cur:
                 cur.execute("SET SESSION sql_mode=CONCAT(@@sql_mode, ',ANSI_QUOTES')")
         except Exception as e:  # noqa: BLE001

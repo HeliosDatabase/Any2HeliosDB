@@ -153,51 +153,18 @@ def export(
     output: str = typer.Option("schema.sql", "--output", "-o", help="DDL output file."),
 ) -> None:
     """Export the source schema as HeliosDB DDL (tables, sequences, indexes, FKs, views)."""
-    from .config.store import (
-        build_source_adapter, build_target_driver, build_type_registry, load_config)
-    from .core.catalog_model import DataTypeKind
-    from .core.orchestrator import _order_views, _portable_view
-    from .emit import ddl
+    from .config.store import build_source_adapter, load_config
+    from .core.export import build_ddl
 
     cfg = load_config(config)
-    pc = cfg.options.preserve_case
     src = build_source_adapter(cfg)
     src.connect()
     try:
         schema = src.introspect_schema(cfg.source.schema)
-        reg = build_type_registry(cfg)
-        parts = []
-        for t in schema.tables:
-            parts.append(ddl.render_create_table(t, reg, pc))
-        for s in schema.sequences:
-            parts.append(ddl.render_sequence(s, pc))
-        for t in schema.tables:
-            for idx in t.indexes:
-                stmt = ddl.render_index(t, idx, pc)
-                if stmt:
-                    parts.append(stmt)
-        # Views are emitted as TARGET DDL: translate the source body toward the
-        # target dialect (backtick identifiers -> PG quoting, MySQL IF() -> CASE,
-        # NVL/DECODE/...) exactly as `migrate` does, so an exported view is valid
-        # on the target instead of raw source SQL. The target driver is built only
-        # to read its dialect + capabilities; no connection is opened.
-        try:
-            _tgt = build_target_driver(cfg)
-            view_dialect = getattr(_tgt, "dialect", "postgres")
-            view_caps = _tgt.capabilities
-        except Exception:  # noqa: BLE001 -- no/incomplete [target]: PG-wire default
-            view_dialect, view_caps = "postgres", None
-        bool_cols = {c.name for t in schema.tables for c in t.columns
-                     if c.data_type.kind is DataTypeKind.BOOLEAN}
-        # Dependency order so a view referencing another view is written after it
-        # (PG and HeliosDB require the referent to exist at CREATE time).
-        for v in _order_views(schema.views):
-            pv, _notes = _portable_view(v, view_dialect, view_caps, bool_cols)
-            parts.append(ddl.render_view(pv, pc))
-        for t in schema.tables:
-            parts.extend(ddl.render_foreign_keys(t, pc))
+        # Same engine path the `export` MCP tool uses, so the CLI and an agent get
+        # byte-identical DDL (tables, sequences, indexes, views, FKs).
         with open(output, "w") as f:
-            f.write("\n\n".join(parts) + "\n")
+            f.write(build_ddl(cfg, schema))
         console.print("wrote {} ({} tables, {} sequences, {} views)".format(
             output, len(schema.tables), len(schema.sequences), len(schema.views)))
         # Procedural/advanced objects are NOT auto-translated (v1.0.0); emit their
@@ -239,6 +206,7 @@ def migrate(config: str = CONFIG_OPT) -> None:
                 drop_existing=cfg.options.drop_existing, preserve_case=cfg.options.preserve_case,
                 batch_size=cfg.options.batch_size, prefer_copy=cfg.options.prefer_copy,
                 cfg=cfg, manifest_path=manifest_path, run_id=run_id, parallelism=cfg.options.parallelism,
+                chunks_per_worker=cfg.options.chunks_per_worker,
             )
         except ResumeDriftError as e:
             # A drop_existing=false re-run resumes the recorded plan; if it can't be
@@ -588,7 +556,10 @@ def resume(config: str = CONFIG_OPT) -> None:
                 drop_existing=False, preserve_case=cfg.options.preserve_case,
                 batch_size=cfg.options.batch_size, prefer_copy=cfg.options.prefer_copy,
                 cfg=cfg, manifest_path=manifest_path,
-                run_id=run_id, parallelism=cfg.options.parallelism, do_schema=False,
+                run_id=run_id, parallelism=cfg.options.parallelism,
+                # Plan-affecting: MUST match what migrate passed, or the config
+                # hash mismatches and resume silently resets the whole run.
+                chunks_per_worker=cfg.options.chunks_per_worker, do_schema=False,
             )
         except ResumeDriftError as e:
             # Fail closed with the clear message (not a traceback): the recorded

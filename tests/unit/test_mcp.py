@@ -545,6 +545,152 @@ def test_default_tokens_file_prefers_env_then_xdg():
     assert default_tokens_file({ENV_TOKENS_FILE: "/x/y/tokens"}) == "/x/y/tokens"
     assert default_tokens_file({}).endswith(os.path.join(".config", "a2h", "mcp-tokens"))
 
+
+# --- MCP parity verbs: export + test_index (viewer) -------------------------
+def test_export_and_test_index_are_viewer_tools():
+    reg = build_catalog()
+    names = {t.name for t in reg.visible_to(_principal(Role.VIEWER))}
+    assert {"export", "test_index"}.issubset(names)
+    # both declare the minimum viewer role
+    assert reg.get("export").role is Role.VIEWER
+    assert reg.get("test_index").role is Role.VIEWER
+
+
+def test_export_dispatch_returns_ddl_and_review(monkeypatch):
+    """The export tool returns the DDL + review TEXT (never writes a server file)."""
+    class _FakeSchema:
+        tables, sequences, views, routines, triggers, mviews = [], [], [], [], [], []
+
+    class _FakeSrc:
+        def connect(self):
+            pass
+
+        def close(self):
+            pass
+
+        def introspect_schema(self, schema):
+            return _FakeSchema()
+
+    import any2heliosdb.config.store as store
+    import any2heliosdb.core.export as export
+    import any2heliosdb.plsql.procedural as procedural
+
+    monkeypatch.setattr(store, "build_source_adapter", lambda cfg: _FakeSrc())
+    monkeypatch.setattr(export, "build_ddl", lambda cfg, schema: "CREATE TABLE emp (...);\n")
+    monkeypatch.setattr(procedural, "render_review", lambda schema: "-- REVIEW: CALC_BONUS\n")
+
+    disp = Dispatcher(build_catalog())
+    resp = disp.handle(
+        {"jsonrpc": "2.0", "id": 20, "method": "tools/call",
+         "params": {"name": "export", "arguments": {
+             "source": {"dialect": "oracle", "host": "h", "user": "u", "service_name": "S"},
+             "target": {"driver": "psycopg"}}}},
+        _principal(Role.VIEWER))
+    payload = resp["result"]["structuredContent"]
+    assert payload["ok"] is True
+    assert payload["ddl"] == "CREATE TABLE emp (...);\n"
+    assert payload["review_sql"] == "-- REVIEW: CALC_BONUS\n"
+
+
+def test_export_dispatch_review_null_when_empty(monkeypatch):
+    """An empty review (nothing procedural to port) surfaces as JSON null."""
+    class _FakeSchema:
+        tables, sequences, views, routines, triggers, mviews = [], [], [], [], [], []
+
+    class _FakeSrc:
+        def connect(self):
+            pass
+
+        def close(self):
+            pass
+
+        def introspect_schema(self, schema):
+            return _FakeSchema()
+
+    import any2heliosdb.config.store as store
+    import any2heliosdb.core.export as export
+    import any2heliosdb.plsql.procedural as procedural
+
+    monkeypatch.setattr(store, "build_source_adapter", lambda cfg: _FakeSrc())
+    monkeypatch.setattr(export, "build_ddl", lambda cfg, schema: "-- ddl\n")
+    monkeypatch.setattr(procedural, "render_review", lambda schema: "")
+
+    disp = Dispatcher(build_catalog())
+    resp = disp.handle(
+        {"jsonrpc": "2.0", "id": 21, "method": "tools/call",
+         "params": {"name": "export", "arguments": {
+             "source": {"dialect": "mysql", "host": "h", "user": "u", "database": "d"},
+             "target": {"driver": "psycopg"}}}},
+        _principal(Role.VIEWER))
+    payload = resp["result"]["structuredContent"]
+    assert payload["ok"] is True
+    assert payload["review_sql"] is None
+
+
+def test_test_index_dispatch_uses_effective_preserve_case_and_serializes(monkeypatch):
+    """test_index mirrors the other validators: it resolves the SAME effective
+    preserve_case (native target -> True) and serializes each ValidationResult."""
+    from any2heliosdb.validate.model import (Severity, ValidationResult,
+                                             ValidationType)
+    from any2heliosdb.validate.util import effective_preserve_case
+
+    captured = {}
+
+    class _Tbl:
+        fqn = "HR.EMP"
+
+    class _FakeSchema:
+        tables = [_Tbl()]
+
+    class _FakeSrc:
+        def connect(self):
+            pass
+
+        def close(self):
+            pass
+
+        def introspect_schema(self, schema):
+            return _FakeSchema()
+
+    class _NativeTgt:
+        dialect = "oracle"  # native target keeps source (upper) case
+
+        def connect(self):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_index(tgt, table, preserve_case):
+        captured["preserve_case"] = preserve_case
+        res = ValidationResult(validation_type=ValidationType.TEST_INDEX)
+        res.add_error(Severity.BLOCKER, table.fqn, "FK index not backfilled")
+        return res
+
+    import any2heliosdb.config.store as store
+    import any2heliosdb.validate.data as data
+
+    tgt = _NativeTgt()
+    monkeypatch.setattr(store, "build_source_adapter", lambda cfg: _FakeSrc())
+    monkeypatch.setattr(store, "build_target_driver", lambda cfg: tgt)
+    monkeypatch.setattr(data, "run_test_index", fake_index)
+
+    disp = Dispatcher(build_catalog())
+    resp = disp.handle(
+        {"jsonrpc": "2.0", "id": 22, "method": "tools/call",
+         "params": {"name": "test_index", "arguments": {
+             "source": {"dialect": "oracle", "host": "h", "user": "u", "service_name": "S"},
+             "target": {"driver": "native", "host": "t", "dbname": "db"}}}},
+        _principal(Role.VIEWER))
+    payload = resp["result"]["structuredContent"]
+    assert payload["ok"] is False  # has a BLOCKER
+    assert payload["results"][0]["validation_type"] == "TEST_INDEX"
+    assert payload["results"][0]["errors"][0]["table"] == "HR.EMP"
+    # native -> effective preserve_case True (matches the shared CLI helper)
+    assert captured["preserve_case"] is True
+    cfg_like = type("C", (), {"options": type("O", (), {"preserve_case": False})()})()
+    assert captured["preserve_case"] == effective_preserve_case(cfg_like, tgt)
+
 def test_test_structure_uses_effective_preserve_case_for_native_target(monkeypatch):
     """Reviewer-flagged missed surface: the TEST structure validator on the MCP
     side must resolve the same effective preserve_case as everything else, or a

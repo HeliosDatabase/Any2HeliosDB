@@ -53,6 +53,20 @@ def save_config(cfg: ProjectConfig, path: str) -> None:
         _toml_write.dump(to_toml_dict(cfg), f)
 
 
+def _positive_timeout(value: object, key: str) -> int:
+    """Reject 0/negative connect timeouts at config load. 0 is not portable:
+    pymysql raises ValueError, other drivers treat it as OS-default/infinite —
+    a knob whose meaning flips per driver is worse than no knob. Minimum 1s;
+    there is deliberately no infinite option (the audit's original finding was
+    sources hanging forever)."""
+    t = int(value)  # type: ignore[call-overload]
+    if t < 1:
+        raise ConfigError(
+            "{} must be >= 1 second (got {}). 0/negative is not portable across "
+            "drivers (pymysql rejects it; others treat it as no timeout).".format(key, t))
+    return t
+
+
 def load_config(path: str) -> ProjectConfig:
     try:
         with open(path, "rb") as f:
@@ -74,6 +88,7 @@ def load_config(path: str) -> ProjectConfig:
         schema=src.get("schema"),
         thick=bool(src.get("thick", False)), client_dir=src.get("client_dir"),
         sysdba=bool(src.get("sysdba", False)),
+        connect_timeout=_positive_timeout(src.get("connect_timeout", 10), "[source] connect_timeout"),
     )
     target = TargetConfig(
         driver=TargetDriverKind(tgt.get("driver", "psycopg")),
@@ -81,15 +96,18 @@ def load_config(path: str) -> ProjectConfig:
         dbname=tgt.get("dbname", "postgres"), user=tgt.get("user", "postgres"),
         password_env=tgt.get("password_env"), password=tgt.get("password"),
         sslmode=tgt.get("sslmode"),
+        connect_timeout=_positive_timeout(tgt.get("connect_timeout", 10), "[target] connect_timeout"),
     )
     options = Options(
         output_dir=opt.get("output_dir", "./migration_output"),
         batch_size=int(opt.get("batch_size", 1000)),
         parallelism=int(opt.get("parallelism", 4)),
+        chunks_per_worker=int(opt.get("chunks_per_worker", 2)),
         prefer_copy=bool(opt.get("prefer_copy", True)),
         preserve_case=bool(opt.get("preserve_case", False)),
         drop_existing=bool(opt.get("drop_existing", True)),
         manifest_backend=str(opt.get("manifest_backend", "sqlite")).lower(),
+        native_call_timeout_ms=int(opt.get("native_call_timeout_ms", 300_000)),
     )
     cdc_d = d.get("cdc", {})
     cdc = CdcConfig(
@@ -143,7 +161,8 @@ def build_target_driver(cfg: ProjectConfig) -> TargetDriver:
     if cfg.source.dialect is SourceDialect.ORACLE:
         from ..target.native_driver import NativeOracleDriver
 
-        return NativeOracleDriver(cfg.target.to_dsn())
+        return NativeOracleDriver(
+            cfg.target.to_dsn(), call_timeout_ms=cfg.options.native_call_timeout_ms)
     raise ConfigError(
         "native target driver for source dialect '{}' is not implemented yet "
         "(Oracle only); use the psycopg driver".format(cfg.source.dialect.value))

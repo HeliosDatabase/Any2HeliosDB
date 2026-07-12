@@ -168,6 +168,7 @@ def migrate(
     manifest_path: Optional[str] = None,
     run_id: Optional[str] = None,
     parallelism: int = 1,
+    chunks_per_worker: int = 2,
     do_schema: bool = True,  # False on resume: skip DDL, continue the data load
 ) -> MigrateStats:
     stats = MigrateStats()
@@ -325,7 +326,7 @@ def migrate(
                                  use_copy=use_copy, preserve_case=preserve_case,
                                  fresh=drop_existing,
                                  concurrent_writes=caps.concurrent_writes,
-                                 batch_size=batch_size)
+                                 batch_size=batch_size, chunks_per_worker=chunks_per_worker)
         ls = loader.run()
         by_fqn = {t.fqn: t.name for t in src.tables}
         for fqn, n in ls.rows.items():

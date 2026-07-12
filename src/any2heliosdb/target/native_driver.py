@@ -35,9 +35,19 @@ class NativeOracleDriver(TargetDriver):
 
     dialect = "oracle"
 
-    def __init__(self, dsn: TargetDsn) -> None:
+    # A close-handshake stall must never fail an otherwise-successful migration, so
+    # the close() path caps its own wait at this small bound regardless of the
+    # (much larger) per-round-trip call_timeout used during the load. Kept internal
+    # (not a config knob): the data is already committed by close() time, so the
+    # only job of this cap is to bound a hung logoff — there is nothing to tune.
+    _CLOSE_CALL_TIMEOUT_MS = 5_000
+
+    def __init__(self, dsn: TargetDsn, call_timeout_ms: int = 300_000) -> None:
         super().__init__(dsn)
         self._conn: Any = None
+        # Per-round-trip call_timeout (ms) for the data path (see connect()).
+        # Exposed via [options] native_call_timeout_ms; default unchanged (300s).
+        self.call_timeout_ms = int(call_timeout_ms)
 
     # --- lifecycle -------------------------------------------------------
     def connect(self) -> None:
@@ -45,18 +55,24 @@ class NativeOracleDriver(TargetDriver):
 
         dsn = "{}:{}/{}".format(self.dsn.host, self.dsn.port, self.dsn.dbname)
         try:
+            # Bound the connection-establishment wait (oracledb's own parameter)
+            # so an unreachable listener fails fast rather than hanging.
+            connect_kw: Any = {}
+            if self.dsn.connect_timeout:
+                connect_kw["tcp_connect_timeout"] = self.dsn.connect_timeout
             self._conn = oracledb.connect(
-                user=self.dsn.user, password=self.dsn.password or "heliosdb", dsn=dsn)
+                user=self.dsn.user, password=self.dsn.password or "heliosdb", dsn=dsn,
+                **connect_kw)
             self._conn.autocommit = True
             # Bound every round-trip. Two reasons: (1) a native migrate must never
             # hang forever on a stalled server response, and (2) setting
             # call_timeout switches oracledb thin to a timeout-driven read loop that
             # is resilient to HeliosDB's TTC response framing — without it the bulk
             # array-INSERT round-trip can block indefinitely (the DDL/SELECT path is
-            # unaffected). 120s is generous for one array-INSERT batch yet still
-            # fails fast on a true stall.
+            # unaffected). Default 300s ([options] native_call_timeout_ms) is
+            # generous for one array-INSERT batch yet still fails on a true stall.
             try:
-                self._conn.call_timeout = 300_000  # ms; generous safety net for a data round-trip
+                self._conn.call_timeout = self.call_timeout_ms  # ms; safety net for a data round-trip
             except Exception:  # noqa: BLE001 -- very old oracledb without call_timeout
                 pass
         except Exception as e:  # noqa: BLE001
@@ -73,7 +89,7 @@ class NativeOracleDriver(TargetDriver):
                 # short and never let a close-handshake stall fail an
                 # otherwise-successful migration.
                 try:
-                    self._conn.call_timeout = 5_000
+                    self._conn.call_timeout = self._CLOSE_CALL_TIMEOUT_MS
                 except Exception:  # noqa: BLE001
                     pass
                 self._conn.close()

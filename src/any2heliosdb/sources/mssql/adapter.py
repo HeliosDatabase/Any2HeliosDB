@@ -190,7 +190,11 @@ class MSSQLAdapter(SourceAdapter):
         import pyodbc  # lazy
 
         try:
-            self._conn = pyodbc.connect(self._connection_string(), autocommit=True)
+            # pyodbc's ``timeout`` kwarg maps to SQL_ATTR_LOGIN_TIMEOUT (seconds) —
+            # the connection-establishment wait — so a firewalled source fails fast.
+            self._conn = pyodbc.connect(
+                self._connection_string(), autocommit=True,
+                timeout=self.dsn.connect_timeout)
         except Exception as e:  # noqa: BLE001
             raise SourceConnectionError(
                 "could not connect to SQL Server at {}:{} as {}: {}".format(

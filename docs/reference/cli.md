@@ -322,6 +322,11 @@ Identifiers follow `[options].preserve_case` (lowercased unless `true`).
 
 **Exit codes.** `0` on success; `1` on a source error.
 
+> Over MCP the same DDL is available as the `export` tool (viewer role), which
+> **returns the DDL + review text** instead of writing files — see
+> [MCP server](../mcp.md). The CLI and the tool share one engine path
+> (`core.export.build_ddl`), so both produce byte-identical DDL.
+
 ### `a2h report`
 
 ```bash

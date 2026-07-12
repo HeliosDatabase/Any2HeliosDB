@@ -38,6 +38,9 @@ class SourceConfig:
     thick: bool = False             # python-oracledb thick mode (Instant Client) — for NNE servers
     client_dir: Optional[str] = None  # Instant Client lib dir (else PATH/LD_LIBRARY_PATH)
     sysdba: bool = False            # connect with SYSDBA privilege (the SYS user)
+    # Seconds to wait to establish the source connection (all dialects) before
+    # failing — bounds a firewalled/unreachable source instead of hanging forever.
+    connect_timeout: int = 10
 
     def to_dsn(self) -> SourceDsn:
         return SourceDsn(
@@ -46,6 +49,7 @@ class SourceConfig:
             password=_resolve_password(self.password_env, self.password) or "",
             schema=self.schema,
             thick=self.thick, client_dir=self.client_dir, sysdba=self.sysdba,
+            connect_timeout=self.connect_timeout,
         )
 
 
@@ -59,12 +63,15 @@ class TargetConfig:
     password_env: Optional[str] = None
     password: Optional[str] = None
     sslmode: Optional[str] = None
+    # Seconds to wait to establish the target connection before failing (consumed
+    # by the psycopg conninfo and the native Oracle-wire driver's connect).
+    connect_timeout: int = 10
 
     def to_dsn(self) -> TargetDsn:
         return TargetDsn(
             host=self.host, port=self.port, dbname=self.dbname, user=self.user,
             password=_resolve_password(self.password_env, self.password),
-            sslmode=self.sslmode,
+            sslmode=self.sslmode, connect_timeout=self.connect_timeout,
         )
 
 
@@ -73,9 +80,20 @@ class Options:
     output_dir: str = "./migration_output"
     batch_size: int = 1000
     parallelism: int = 4
+    # Target chunks per worker: the resumable loader splits each table into
+    # ~``parallelism * chunks_per_worker`` PK-range chunks. More chunks smooth
+    # per-worker skew (a bigger chunk finishing last) at the cost of more chunk
+    # bookkeeping. Plan-affecting: it joins the loader's config hash so changing
+    # it resets the run rather than silently mixing two chunk plans.
+    chunks_per_worker: int = 2
     prefer_copy: bool = True
     preserve_case: bool = False
     drop_existing: bool = True
+    # Native (Oracle-wire) target only: the per-round-trip ``call_timeout`` (ms)
+    # set on the oracledb connection — a generous safety net so a bulk array-INSERT
+    # never blocks forever on a stalled HeliosDB TTC response. Unused by the
+    # psycopg/PG-wire path.
+    native_call_timeout_ms: int = 300_000
     # Resumable-load ledger backend: "sqlite" (stdlib, zero-friction default) or
     # "nano" (embedded HeliosDB-Nano via the any2heliosdb[nano-manifest] extra —
     # dogfoods the engine; the manifest becomes a RocksDB directory).
