@@ -77,6 +77,9 @@ the extra:
 
 ```bash
 pip install 'any2heliosdb[nano-manifest]'   # adds heliosdb-nano-embedded
+# NOTE: heliosdb-nano-embedded is not yet on PyPI — this extra needs the wheel
+# installed out-of-band / from a private index first. It is deliberately NOT
+# part of [all], so [all] installs cleanly from PyPI.
 ```
 
 Both backends are functionally identical — same resume, status, and live monitor.
