@@ -132,6 +132,9 @@ class PostgresAdapter(SourceAdapter):
         kw: Dict[str, Any] = {
             "host": self.dsn.host, "port": self.dsn.port, "user": self.dsn.user,
             "dbname": dbname, "autocommit": True,
+            # Bound the connection-establishment wait (libpq connect_timeout,
+            # seconds) so a firewalled source fails fast instead of hanging.
+            "connect_timeout": self.dsn.connect_timeout,
         }
         if self.dsn.password:
             kw["password"] = self.dsn.password

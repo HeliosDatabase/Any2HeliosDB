@@ -57,7 +57,7 @@ class LoadStats:
 class ResumableLoader:
     def __init__(self, cfg, schema, manifest_path, run_id, parallelism=4,
                  use_copy=True, preserve_case=False, fresh=False,
-                 concurrent_writes=True, batch_size=1000):
+                 concurrent_writes=True, batch_size=1000, chunks_per_worker=2):
         self.cfg = cfg
         self.schema = schema
         self.manifest_path = manifest_path
@@ -66,6 +66,11 @@ class ResumableLoader:
             getattr(cfg, "options", None), "manifest_backend", "sqlite")
         self.run_id = run_id
         self.parallelism = max(1, int(parallelism))
+        # Target ~parallelism*chunks_per_worker PK-range chunks per table (config
+        # [options].chunks_per_worker, default 2). Plan-affecting — it sets the
+        # chunk COUNT, so it joins _config_hash (a changed value resets the run
+        # rather than replaying a stale plan against a different chunk count).
+        self.chunks_per_worker = max(1, int(chunks_per_worker))
         # Source-side fetch arraysize for the per-chunk streaming read (config
         # [options].batch_size). Threaded through to stream_rows in _load_chunk so
         # the documented knob actually tunes this (resumable/parallel) path — not
@@ -182,7 +187,7 @@ class ResumableLoader:
                 rows_est = 0
             man.add_table(self.run_id, t.fqn, t.target_name(self.preserve_case),
                           total_rows_est=rows_est)
-            for ch in compute_chunks(probe, t, self.parallelism * 2):
+            for ch in compute_chunks(probe, t, self.parallelism * self.chunks_per_worker):
                 self._chunks[ch.chunk_id] = ch
                 man.add_chunk(self.run_id, t.fqn, ch.chunk_id,
                               predicate=ch.source_where(),
@@ -274,13 +279,17 @@ class ResumableLoader:
 
     def _config_hash(self) -> str:
         """Stable hash of the plan-affecting config (source/target identity +
-        schema + parallelism + preserve_case; passwords excluded). Drives the
-        drift guard in plan() so a reused run_id can't trust stale LOADED chunks
-        after the config that produced them changed.
+        schema + parallelism + chunks_per_worker + preserve_case; passwords
+        excluded). Drives the drift guard in plan() so a reused run_id can't trust
+        stale LOADED chunks after the config that produced them changed.
 
-        batch_size is intentionally EXCLUDED: it only sets the per-chunk fetch
-        arraysize, not the chunk plan (predicates/bounds), so changing it across a
-        resume must not invalidate already-LOADED chunks."""
+        chunks_per_worker IS included: with parallelism it sets the per-table chunk
+        COUNT, so a changed value must reset the run — otherwise a resume would
+        replay the OLD recorded chunk plan while the operator believes the new
+        chunking is in effect (silently mixing two plans). batch_size is
+        intentionally EXCLUDED: it only sets the per-chunk fetch arraysize, not the
+        chunk plan (predicates/bounds), so changing it across a resume must not
+        invalidate already-LOADED chunks."""
         import hashlib
         s, t, o = self.cfg.source, self.cfg.target, self.cfg.options
         src_db = (getattr(s, "database", None) or getattr(s, "service_name", None)
@@ -290,6 +299,16 @@ class ResumableLoader:
             getattr(t, "driver", ""), t.host, t.port, t.dbname, getattr(t, "user", ""),
             bool(o.preserve_case), int(self.parallelism),
         ))
+        # chunks_per_worker joins the key ONLY when non-default. Backward
+        # compatibility is load-bearing: manifests recorded before the knob
+        # existed hold the 13-field hash, and every pre-upgrade run by
+        # definition used the implicit default (2) — appending the field
+        # unconditionally would mismatch EVERY such manifest and silently
+        # reset perfectly-resumable runs on first post-upgrade resume. A
+        # non-default value never matches an old hash, which is exactly
+        # right: the implicit plan knob genuinely changed.
+        if int(self.chunks_per_worker) != 2:
+            key += "|{}".format(int(self.chunks_per_worker))
         return hashlib.sha1(key.encode("utf-8")).hexdigest()
 
     # --- execution -------------------------------------------------------
