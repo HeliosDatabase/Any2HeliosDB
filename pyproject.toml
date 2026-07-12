@@ -60,9 +60,14 @@ mssql = ["pyodbc>=5.0"]
 mcp = ["mcp>=1.0 ; python_version >= '3.10'"]
 # Use embedded HeliosDB-Nano (in-process) as the resumable-load ledger backend
 # instead of the stdlib sqlite3 default ([options] manifest_backend = "nano").
+# NOTE: heliosdb-nano-embedded is not yet published on PyPI — installing this
+# extra from PyPI fails; it requires the private index / a local wheel (see
+# docs/guides/configuration.md). Deliberately EXCLUDED from `all` below so the
+# advertised `pip install any2heliosdb[all]` works for public users; re-add it
+# to `all` when the wheel is published (tracked in the team backlog).
 nano-manifest = ["heliosdb-nano-embedded>=3.60.8"]
 all = ["oracledb>=2.0", "PyMySQL>=1.1", "mysql-replication>=1.0", "pyodbc>=5.0",
-       "mcp>=1.0 ; python_version >= '3.10'", "heliosdb-nano-embedded>=3.60.8"]
+       "mcp>=1.0 ; python_version >= '3.10'"]
 dev = ["pytest>=7", "pytest-cov", "ruff", "mypy"]
 
 [project.scripts]

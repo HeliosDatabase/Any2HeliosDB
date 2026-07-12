@@ -58,12 +58,13 @@ CDC), `[mssql]` (pyodbc + an ODBC driver), `[mcp]` (the MCP server SDK),
 option), or `[all]`. Python 3.9+; core deps are light (`psycopg[binary]`, `typer`,
 `rich`, `jinja2`, `tomli`/`tomli-w`). Verify your environment with `a2h doctor`.
 
-> **PyPI caveat.** The `nano-manifest` extra (and therefore `[all]`) pulls
-> `heliosdb-nano-embedded`, which is **not yet published to PyPI**, so
-> `pip install any2heliosdb[nano-manifest]` / `[all]` cannot resolve from PyPI
-> today. Install that wheel out-of-band (or from a local index) first, or stay on
-> the default `manifest_backend = "sqlite"` (stdlib, zero extra deps). Every other
-> extra installs cleanly from PyPI.
+> **PyPI caveat.** The `nano-manifest` extra pulls `heliosdb-nano-embedded`,
+> which is **not yet published to PyPI**, so `pip install
+> any2heliosdb[nano-manifest]` cannot resolve from PyPI today — install that
+> wheel out-of-band (or from a local index) first, or stay on the default
+> `manifest_backend = "sqlite"` (stdlib, zero extra deps). `[all]` deliberately
+> **excludes** it for exactly that reason: `[all]` and every other extra install
+> cleanly from PyPI. It rejoins `[all]` once the wheel is published.
 
 > Developing on a checkout? Use an editable install instead:
 > `pip install -e ".[all,dev]"`.
