@@ -174,6 +174,10 @@ class OracleAdapter(SourceAdapter):
         else:
             conn_dsn = "{}:{}".format(self.dsn.host, self.dsn.port)
         kw: Dict[str, Any] = {"user": self.dsn.user, "password": self.dsn.password, "dsn": conn_dsn}
+        # Bound the connection-establishment wait (oracledb's own parameter) so a
+        # firewalled/unreachable source fails fast instead of hanging assess/migrate.
+        if self.dsn.connect_timeout:
+            kw["tcp_connect_timeout"] = self.dsn.connect_timeout
         if self.dsn.sysdba:
             kw["mode"] = oracledb.AUTH_MODE_SYSDBA  # required for the SYS user
         try:
