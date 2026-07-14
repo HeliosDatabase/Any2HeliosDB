@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 import tempfile
 
+import pytest
+
 from any2heliosdb.config.model import (Options, ProjectConfig, SourceConfig,
                                        TargetConfig)
 from any2heliosdb.config.store import build_target_driver, load_config, save_config
@@ -96,7 +98,7 @@ def test_legacy_config_without_new_keys_gets_defaults(tmp_path):
 
 # --- source adapters thread connect_timeout into the driver ------------------
 def test_oracle_source_passes_tcp_connect_timeout(monkeypatch):
-    import oracledb
+    oracledb = pytest.importorskip("oracledb")
 
     from any2heliosdb.sources.oracle.adapter import OracleAdapter
 
@@ -109,7 +111,7 @@ def test_oracle_source_passes_tcp_connect_timeout(monkeypatch):
 
 
 def test_mysql_source_passes_connect_timeout(monkeypatch):
-    import pymysql
+    pymysql = pytest.importorskip("pymysql")
 
     from any2heliosdb.sources.mysql.adapter import MySQLAdapter
 
@@ -122,7 +124,7 @@ def test_mysql_source_passes_connect_timeout(monkeypatch):
 
 
 def test_mssql_source_passes_login_timeout(monkeypatch):
-    import pyodbc
+    pyodbc = pytest.importorskip("pyodbc")
 
     from any2heliosdb.sources.mssql.adapter import MSSQLAdapter
 
@@ -155,7 +157,7 @@ def test_postgres_source_passes_connect_timeout(monkeypatch):
 
 # --- native target: connect_timeout + call_timeout_ms ------------------------
 def test_native_target_threads_call_timeout_and_connect_timeout(monkeypatch):
-    import oracledb
+    oracledb = pytest.importorskip("oracledb")
 
     cfg = ProjectConfig(
         source=SourceConfig(dialect=SourceDialect.ORACLE),
