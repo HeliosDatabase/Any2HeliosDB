@@ -98,6 +98,11 @@ class Options:
     # "nano" (embedded HeliosDB-Nano via the any2heliosdb[nano-manifest] extra —
     # dogfoods the engine; the manifest becomes a RocksDB directory).
     manifest_backend: str = "sqlite"
+    # TEST_DATA row-mismatch budget: run_test_data stops after this many mismatches
+    # per table so a badly-diverged table fails fast instead of hashing the whole
+    # sample. Honored identically by the CLI `test-data` command and the MCP
+    # `test_data` tool.
+    test_data_max_errors: int = 10
 
 
 @dataclass

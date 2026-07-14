@@ -65,6 +65,7 @@ put it on `LD_LIBRARY_PATH`). The env vars `A2H_ORACLE_THICK=1` and
 | `drop_existing` | bool | `true` | `DROP TABLE … CASCADE` before re-creating on `migrate` (ignored by `resume`). |
 | `manifest_backend` | string | `sqlite` | Resumable-load ledger store: `sqlite` (stdlib, zero-friction default) or `nano` (embedded HeliosDB-Nano, in-process). See below. |
 | `native_call_timeout_ms` | int | `300000` | **Native (Oracle-wire) target only.** Per-round-trip `call_timeout` (milliseconds) on the oracledb connection — a generous safety net so a bulk array-INSERT never blocks forever on a stalled HeliosDB TTC response. Unused by the psycopg/PG-wire path. (The short close-handshake wait stays a fixed internal bound: by close time the data is already committed, so there is nothing to tune.) |
+| `test_data_max_errors` | int | `10` | `test-data` stops after this many row mismatches per table so a badly-diverged table fails fast instead of hashing the whole sample. Honored identically by the CLI `test-data` command and the MCP `test_data` tool. `test-data` streams the source in `batch_size` chunks and compares both sides on a **byte-canonical PK** order (collation-stable), so a source/target `ORDER BY` collation disagreement no longer false-fails; for a string PK whose two sides collate differently, use `--sample 0` (full compare) for an exact result. |
 
 ### `manifest_backend` — SQLite vs embedded Nano
 
