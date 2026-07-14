@@ -15,15 +15,16 @@ def test_cdc_defaults():
     assert c.poison_retries == 3
     assert c.poison_max_per_run == 25
     assert c.trail_rotate_mb == 256
+    assert c.txn_apply == "auto"
 
 
 def test_cdc_section_roundtrips():
     cfg = ProjectConfig()
     cfg.cdc = CdcConfig(capture_batch=1234, apply_batch=77, poison_retries=5,
-                        poison_max_per_run=9, trail_rotate_mb=64)
+                        poison_max_per_run=9, trail_rotate_mb=64, txn_apply="off")
     d = to_toml_dict(cfg)
     assert d["cdc"]["capture_batch"] == 1234 and d["cdc"]["trail_rotate_mb"] == 64
-    assert d["cdc"]["poison_max_per_run"] == 9
+    assert d["cdc"]["poison_max_per_run"] == 9 and d["cdc"]["txn_apply"] == "off"
     fd, p = tempfile.mkstemp(suffix=".toml")
     os.close(fd)
     try:
@@ -34,6 +35,7 @@ def test_cdc_section_roundtrips():
         assert back.cdc.poison_retries == 5
         assert back.cdc.poison_max_per_run == 9
         assert back.cdc.trail_rotate_mb == 64
+        assert back.cdc.txn_apply == "off"
     finally:
         os.remove(p)
 
@@ -47,5 +49,6 @@ def test_legacy_config_without_cdc_gets_defaults():
         cfg = load_config(p)
         assert cfg.cdc.capture_batch == 50_000 and cfg.cdc.poison_retries == 3
         assert cfg.cdc.poison_max_per_run == 25
+        assert cfg.cdc.txn_apply == "auto"
     finally:
         os.remove(p)

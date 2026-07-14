@@ -139,12 +139,29 @@ class CdcConfig:
       many MB (closed segments become ``trail.NNNNN.jsonl``); the apply cursor
       stays a single global line index across segments, so legacy single-file
       trails keep working unchanged. ``0`` disables rotation (one ``trail.jsonl``).
+    * ``txn_apply`` — per-source-transaction atomic apply. Log-based capture tags
+      each record with its source-transaction id (``txn_id``); when this is enabled
+      AND the target proves it services multi-statement transactions (the
+      ``multi_statement_txn`` capability probe), the replicat applies each
+      **keymove-free** source transaction inside ONE target ``BEGIN``/``COMMIT`` —
+      so a source commit lands all-or-nothing and its intra-transaction ordering
+      (e.g. a child re-point that follows a non-key parent change, or cross-table
+      insert/delete order under deferrable constraints) is preserved. ``"auto"``
+      (default) enables it wherever the probe confirms transactional atomicity and
+      the trail carries ``txn_id`` (so pre-upgrade trails, the Oracle SCN source,
+      and txn-incapable targets transparently keep the per-record keymove-barrier
+      path); ``"on"`` is the same gate stated explicitly; ``"off"`` forces the
+      legacy per-record apply everywhere. A source transaction that CONTAINS a
+      primary-key move (a re-keyed parent) always stays on the keymove-barrier path
+      regardless — atomic supersession of the barrier for keymove transactions is a
+      separate, later change. See docs/cdc.md.
     """
     capture_batch: int = 50_000
     apply_batch: int = 10_000
     poison_retries: int = 3
     poison_max_per_run: int = 25
     trail_rotate_mb: int = 256
+    txn_apply: str = "auto"
 
 
 @dataclass

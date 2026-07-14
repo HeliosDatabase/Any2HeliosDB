@@ -69,6 +69,15 @@ class CapabilityMatrix:
     # pass indefinitely. Edition-derived, not probed: a probe would have to risk
     # the very hang it is testing for. Drives serial loading on those targets.
     concurrent_writes: bool = True
+    # Whether the target services a multi-statement transaction atomically: a
+    # ``BEGIN`` … several writes … ``ROLLBACK`` leaves NONE of the writes, and a
+    # ``COMMIT`` lands all of them. Probed live (a rolled-back write must vanish),
+    # never assumed — the CDC replicat gates per-source-transaction atomic apply on
+    # it, falling back to the per-record keymove-barrier apply when it is False.
+    # Distinct from ``concurrent_writes`` (that is about a SECOND concurrent writer,
+    # which the Apache editions block on; a single replicat's own BEGIN/COMMIT is a
+    # different question answered by this probe).
+    multi_statement_txn: bool = False
     # Functions / procedural
     has_version_function: bool = False
     gen_random_uuid: bool = False
