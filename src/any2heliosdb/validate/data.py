@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import heapq
 from decimal import Decimal, InvalidOperation
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -153,18 +154,46 @@ def _table(table: Table, preserve_case: bool) -> str:
     return _quote_table(table.target_name(preserve_case))
 
 
-def _source_rows(
-    source: SourceAdapter, table: Table, columns: Sequence[str], pk_cols: Sequence[str], limit: int
-) -> List[Tuple]:
-    """Pull rows from the source and order/limit by PK client-side.
+def _pk_component_key(v: object) -> object:
+    """Reduce one PK component to a collation-STABLE sort key.
 
-    ``stream_rows`` is order-agnostic, so we sort by the PK-column positions here
-    to guarantee both sides are aligned identically before hashing.
+    Source and target ``ORDER BY`` collate a string PK differently (case/accent
+    folding vs raw bytes), so trusting either DB's ordering lets equal rows line up
+    out of order and the row-by-row compare false-fails. Reduce a string to its raw
+    UTF-8 bytes — a byte order both sides agree on regardless of DB collation, and
+    identical to Python's own ``str`` ordering (UTF-8 byte order preserves code-point
+    order), so small-table behaviour is unchanged. Every other type passes through:
+    numbers/dates already order identically on both sides, and bytes are compared as
+    themselves.
+    """
+    if isinstance(v, str):
+        return v.encode("utf-8")
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        return bytes(v)
+    return v
+
+
+def _pk_sort_key(row: Sequence[object], pk_idx: Sequence[int]) -> Tuple:
+    """The byte-canonical, collation-stable sort key of *row*'s PK columns."""
+    return tuple(_pk_component_key(row[i]) for i in pk_idx)
+
+
+def _source_rows(
+    source: SourceAdapter, table: Table, columns: Sequence[str], pk_cols: Sequence[str],
+    limit: int, batch_size: int,
+) -> List[Tuple]:
+    """The *limit* rows with the smallest byte-canonical PK, WITHOUT materializing
+    the whole table.
+
+    ``stream_rows`` is order-agnostic and streams server-side (fetched in
+    ``batch_size`` chunks), so a bounded heap keeps only the ``limit`` smallest rows
+    by the collation-stable PK key — resident memory is O(limit), not O(table). For
+    a full compare (``limit`` huge) this degrades to sorting every row, matching the
+    pre-fix behaviour for that case.
     """
     pk_idx = [columns.index(c) for c in pk_cols]
-    rows = list(source.stream_rows(table, columns))
-    rows.sort(key=lambda r: tuple(r[i] for i in pk_idx))
-    return rows[:limit]
+    stream = source.stream_rows(table, columns, arraysize=batch_size)
+    return heapq.nsmallest(limit, stream, key=lambda r: _pk_sort_key(r, pk_idx))
 
 
 def _target_rows(
@@ -176,7 +205,12 @@ def _target_rows(
     sql = "SELECT {} FROM {} ORDER BY {} LIMIT {}".format(
         cols, _table(table, preserve_case), order, int(limit)
     )
-    return target.query(sql)
+    rows = target.query(sql)
+    # The SQL ORDER BY samples the smallest ``limit`` rows in the TARGET's collation;
+    # re-sort them by the same byte-canonical PK key the source used so the two
+    # ordered sequences align for the merge regardless of the target's collation.
+    pk_idx = [columns.index(c) for c in pk_cols]
+    return sorted(rows, key=lambda r: _pk_sort_key(r, pk_idx))
 
 
 def _sql_literal(v: object) -> Optional[str]:
@@ -270,10 +304,21 @@ def run_test_data(
     sample_rows: int = 1000,
     max_errors: int = 10,
     preserve_case: bool = False,
+    batch_size: int = 1000,
 ) -> ValidationResult:
     """Compare up to *sample_rows* rows of *table* by per-row SHA256.
 
-    ``sample_rows <= 0`` compares every row.
+    ``sample_rows <= 0`` compares every row. Both sides are pulled ordered by a
+    **byte-canonical PK key** (collation-stable) and **merge-compared** on that key,
+    so a source/target ``ORDER BY`` collation disagreement can no longer misalign
+    equal string-PK rows into a false mismatch. The source is streamed in
+    ``batch_size`` chunks into a bounded smallest-``sample_rows`` heap, so a large
+    table is never fully resident (the audit's RAM blow-up). ``max_errors`` stops a
+    badly-diverged table fast.
+
+    Sampling caveat: when the source and target collate a string PK differently, the
+    two "smallest N" samples can be different *sets* of rows; use ``sample_rows = 0``
+    (full compare, always exact) to validate such tables precisely.
     """
     result = ValidationResult(validation_type=ValidationType.TEST_DATA)
     columns = _column_names(table)
@@ -304,11 +349,9 @@ def run_test_data(
         return result
 
     limit = sample_rows if sample_rows > 0 else 1_000_000_000
-    src_rows = _source_rows(source, table, columns, pk.columns, limit)
+    bs = batch_size if batch_size and batch_size > 0 else 1000
+    src_rows = _source_rows(source, table, columns, pk.columns, limit, bs)
     tgt_rows = _target_rows(target, table, columns, pk.columns, limit, preserve_case)
-
-    compared = min(len(src_rows), len(tgt_rows))
-    mismatches = 0
 
     if len(src_rows) != len(tgt_rows):
         result.add_error(
@@ -319,17 +362,38 @@ def run_test_data(
             ),
         )
 
-    for i in range(compared):
-        if row_checksum(src_rows[i]) != row_checksum(tgt_rows[i]):
+    # Merge-compare the two byte-canonically ordered sequences on the PK: equal keys
+    # get a checksum compare; a key present on only one side is itself a mismatch.
+    # This aligns rows by identity rather than by position, so a differing collation
+    # (or a single interior missing row) never cascades into false per-row mismatches.
+    pk_idx = [columns.index(c) for c in pk.columns]
+    i = j = 0
+    compared = 0
+    mismatches = 0
+    while i < len(src_rows) and j < len(tgt_rows):
+        sk = _pk_sort_key(src_rows[i], pk_idx)
+        tk = _pk_sort_key(tgt_rows[j], pk_idx)
+        if sk == tk:
+            if row_checksum(src_rows[i]) != row_checksum(tgt_rows[j]):
+                mismatches += 1
+                result.add_error(Severity.BLOCKER, table.fqn,
+                                 "row {} checksum mismatch".format(compared))
+            compared += 1
+            i += 1
+            j += 1
+        elif sk < tk:
             mismatches += 1
-            result.add_error(
-                Severity.BLOCKER,
-                table.fqn,
-                "row {} checksum mismatch".format(i),
-            )
-            if mismatches >= max_errors:
-                result.metrics["stopped_early"] = True
-                break
+            result.add_error(Severity.BLOCKER, table.fqn,
+                             "row {} present in source but missing from target".format(compared))
+            i += 1
+        else:
+            mismatches += 1
+            result.add_error(Severity.BLOCKER, table.fqn,
+                             "row {} present in target but missing from source".format(compared))
+            j += 1
+        if mismatches >= max_errors:
+            result.metrics["stopped_early"] = True
+            break
 
     result.metrics["rows_compared"] = compared
     result.metrics["mismatches"] = mismatches

@@ -60,13 +60,15 @@ def test_options_tunables_defaults():
     o = Options()
     assert o.chunks_per_worker == 2
     assert o.native_call_timeout_ms == 300_000
+    assert o.test_data_max_errors == 10
 
 
 def test_all_new_keys_roundtrip_through_toml():
     cfg = ProjectConfig()
     cfg.source = SourceConfig(dialect=SourceDialect.ORACLE, connect_timeout=3)
     cfg.target = TargetConfig(driver=TargetDriverKind.PSYCOPG, connect_timeout=5)
-    cfg.options = Options(chunks_per_worker=4, native_call_timeout_ms=120_000)
+    cfg.options = Options(chunks_per_worker=4, native_call_timeout_ms=120_000,
+                          test_data_max_errors=25)
     fd, p = tempfile.mkstemp(suffix=".toml")
     os.close(fd)
     try:
@@ -76,6 +78,7 @@ def test_all_new_keys_roundtrip_through_toml():
         assert back.target.connect_timeout == 5
         assert back.options.chunks_per_worker == 4
         assert back.options.native_call_timeout_ms == 120_000
+        assert back.options.test_data_max_errors == 25
     finally:
         os.remove(p)
 
@@ -88,6 +91,7 @@ def test_legacy_config_without_new_keys_gets_defaults(tmp_path):
     assert cfg.target.connect_timeout == 10
     assert cfg.options.chunks_per_worker == 2
     assert cfg.options.native_call_timeout_ms == 300_000
+    assert cfg.options.test_data_max_errors == 10
 
 
 # --- source adapters thread connect_timeout into the driver ------------------
