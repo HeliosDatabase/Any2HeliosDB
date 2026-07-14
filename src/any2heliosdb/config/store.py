@@ -108,6 +108,7 @@ def load_config(path: str) -> ProjectConfig:
         drop_existing=bool(opt.get("drop_existing", True)),
         manifest_backend=str(opt.get("manifest_backend", "sqlite")).lower(),
         native_call_timeout_ms=int(opt.get("native_call_timeout_ms", 300_000)),
+        test_data_max_errors=int(opt.get("test_data_max_errors", 10)),
     )
     cdc_d = d.get("cdc", {})
     cdc = CdcConfig(
@@ -125,6 +126,27 @@ def load_config(path: str) -> ProjectConfig:
 
 
 # --- runtime object builders -------------------------------------------------
+def connect_both(first: SourceAdapter, second: TargetDriver) -> None:
+    """Open *first* then *second*, closing *first* if *second*.connect() raises.
+
+    Every two-connection command (validation, migrate/resume, the CDC replicat)
+    opens the source, then the target. If the target connect fails, the source is
+    already open but the caller's ``try/finally`` — which closes both — has not been
+    entered yet, so the source socket leaks. On a long-running MCP server those
+    half-open sources accumulate. Centralize the guard so every call site is
+    leak-safe by construction.
+    """
+    first.connect()
+    try:
+        second.connect()
+    except BaseException:
+        try:
+            first.close()
+        except Exception:  # noqa: BLE001 - never mask the real connect error
+            pass
+        raise
+
+
 def build_source_adapter(cfg: ProjectConfig) -> SourceAdapter:
     dialect = cfg.source.dialect
     if dialect is SourceDialect.ORACLE:

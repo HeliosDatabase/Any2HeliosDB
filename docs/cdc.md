@@ -216,6 +216,22 @@ Each unit that flows source → trail → sink is a `ChangeRecord`
   JSON can't round-trip, so each is **type-tagged** on encode (`dec`, `ts`, `d`,
   `b64` base64 for bytes) and rebuilt on decode, preserving the exact type the
   target driver binds.
+- **Timestamp fidelity (UTC normalization).** A **tz-aware** `datetime` (a
+  `timestamptz`) is an instant, so it is normalized to **UTC** on encode (stored with
+  a `+00:00` offset) and rebuilt tz-aware on decode — a replicat applying to a target
+  in a **different session timezone** reconstructs the *same instant* rather than a
+  shifted wall-clock time. A **naive** `datetime` (a plain zone-less `TIMESTAMP`) is a
+  wall-clock reading with no instant to anchor and is stored **unchanged**. Pre-fix
+  trail lines (written in source-session local wall time, carrying their own offset)
+  keep that offset and decode byte-for-byte as before — **no wire break**.
+- **MySQL JSON / SET.** A binlog **JSON** column arrives as a Python `dict`/`list`
+  and a **SET** column as a Python `set`. Rather than the Python `repr` a bare
+  `str()` would emit (single-quoted keys, `{…}` braces — garbage on the target),
+  they are serialized as compact, **key-sorted JSON text** (a JSON column maps to
+  `JSONB`) and a **comma-joined SET literal** (SET maps to `TEXT`) respectively — so
+  the applied value is valid on the target. Sorting keeps both deterministic across
+  runs. On decode they stay **text** (the exact string the apply binds to the
+  JSONB/TEXT column).
 
 ## v1 limitations
 
