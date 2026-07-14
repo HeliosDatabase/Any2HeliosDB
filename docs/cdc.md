@@ -447,20 +447,74 @@ narrowed to the key-move alone by the
 [keymove barrier](#keymove-barrier-per-record-cursor-around-a-pk-move). Together
 they make a key-move fully replay-safe on every driver.
 
-### Residual limitation: FK ordering across a re-keyed parent
+### FK ordering: per-source-transaction atomic apply
 
-The in-place `UPDATE` removes the *delete-the-parent* hazard, but a
-foreign-key-enforcing target can still reject a **parent-key** `UPDATE` on its own:
-the source may have re-keyed a parent and re-pointed its children **in one
-transaction**, but the trail is a flat per-row stream and the replicat has **no
-transaction boundaries yet** (a v2 backlog item), so the child re-points can arrive
-*after* the parent-key change. An immediate-checking FK then sees a moment where
-children still reference the old parent key. If your target enforces foreign keys
-and your workload re-keys parent rows, either run the apply inside a window with
-**deferred constraints** (`SET CONSTRAINTS ALL DEFERRED`, or declare the FKs
-`DEFERRABLE INITIALLY DEFERRED`) or drop/disable the FK for the CDC window
-(the `--no-fk` load posture) and re-validate afterwards. Targets that do not
-enforce FKs (e.g. HeliosDB-Lite in parse-only mode) are unaffected.
+Log-based capture now tags every change record with the **source transaction** it
+belonged to (a `txn_id` — PostgreSQL's `BEGIN`/`COMMIT` xid, MySQL's commit `XID`).
+The replicat regroups the flat trail stream back into those transactions and, when
+the target proves it services multi-statement transactions atomically (the
+`multi_statement_txn` capability probe — a live `BEGIN`/write/`ROLLBACK` check), it
+applies each **keymove-free** source transaction inside **one target
+`BEGIN`/`COMMIT`**. A source commit therefore lands all-or-nothing on the target and
+its **intra-transaction ordering is preserved**, so a foreign-key-enforcing target
+no longer sees a partially-applied transaction — the cross-table insert/delete
+order, and a child re-point that follows a non-key parent change, are all satisfied
+inside the one transaction (checked at `COMMIT` under deferrable constraints).
+
+This is governed by the `[cdc] txn_apply` key (`docs/guides/configuration.md`):
+
+- `"auto"` (default) enables atomic apply wherever the capability probe confirms
+  transactional atomicity **and** the trail carries `txn_id`s;
+- `"on"` is the same gate stated explicitly;
+- `"off"` forces the legacy per-record apply everywhere.
+
+Anything the probe does **not** cover keeps the exact per-record path unchanged: a
+txn-incapable target, a pre-upgrade trail (no `txn_id`), and the Oracle SCN-watermark
+source (a snapshot with no transaction boundaries) all fall back transparently to the
+keymove-barrier apply — old trails apply byte-identically, and a mixed old-prefix /
+new-suffix trail applies each part correctly. Because a transaction must be applied
+whole, `apply_batch` never splits one: a chunk is extended to the next transaction
+boundary, and a single transaction larger than `apply_batch` is applied whole (the
+same documented per-txn memory overshoot as capture). A transaction that fails to
+apply rolls back entirely and is retried; if it still fails it is dead-lettered **as
+a unit** (all its records) — or fails closed against an unreachable target (the same
+poison-vs-outage `ping()` rule, now at transaction granularity).
+
+**Completeness terminator — a partial transaction is never committed.** Capture
+stamps the **last** record of each source transaction with a durable terminator
+(`txn_end` — set at PostgreSQL's `COMMIT` / MySQL's `XID` commit). The replicat treats
+a tagged run as an atomic-eligible *whole* transaction only when it is **certified
+complete**: its last record carries `txn_end`, **or** a record with a different
+`txn_id` already follows it in the durable trail. A trailing tagged run that is
+neither — a buffered-writer flush that persisted the leading records but not the
+terminator, or a crash between flush and `fsync` — is an **incomplete tail**: it is
+held back like the torn-tail heal, leaving the apply cursor *before* it, so a partial
+source transaction is **never** committed (nor half-applied via the barrier). It
+applies on a later run, atomically and exactly once, as soon as its terminator (or the
+next transaction) is durable — the extract re-appends the never-trailed remainder on
+its next cycle. `txn_end` is emitted only when set, so legacy / untagged / keymove
+trail lines stay byte-for-byte identical.
+
+### Residual limitation: a re-keyed *parent* (a keymove inside a transaction)
+
+One case is deliberately **not** yet covered by atomic apply: a source transaction
+that **re-keys a parent row** (a primary-key move — a "keymove"). Such a transaction
+still applies via the [keymove barrier](#keymove-barrier-per-record-cursor-around-a-pk-move),
+which isolates the keymove so it can only ever *replay alone* — the property that
+makes a keymove replay-safe against the impostor problem (an old key later reused by
+a different row). Wrapping a keymove transaction in one atomic target transaction
+would, after the commit-then-cursor-persist crash window, force a **whole-transaction
+replay** that re-introduces exactly that impostor divergence, so superseding the
+barrier for keymove transactions needs a stronger mechanism (a cursor committed
+transactionally *in the target* alongside the data) and live per-edition validation —
+that is deferred. Until then, if your target enforces foreign keys immediately **and**
+your workload re-keys parent rows, run the CDC window with **deferred constraints**
+(`SET CONSTRAINTS ALL DEFERRED`, or declare the FKs `DEFERRABLE INITIALLY DEFERRED`)
+or drop/disable the FK for the window (the `--no-fk` load posture) and re-validate
+afterwards. Cross-transaction FK dependencies the **source itself split across
+commits** are ordered by commit order, never reassembled — order your source
+transactions so each commit leaves referential integrity intact. Targets that do not
+enforce FKs (e.g. HeliosDB-Lite in parse-only mode) are unaffected either way.
 
 ## Operational hardening (tier 2)
 

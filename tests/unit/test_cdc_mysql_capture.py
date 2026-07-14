@@ -205,6 +205,66 @@ def test_capture_multi_row_event_shares_base_but_orders_rows(monkeypatch):
     assert keys == sorted(keys) and len(set(keys)) == 3   # strict total order
 
 
+class _XidEvent:
+    """Fake commit event (as ``pymysqlreplication.event.XidEvent``)."""
+
+    def __init__(self, xid):
+        self.xid = xid
+
+
+def _install_txn_reader(monkeypatch, events, log_file="mysql-bin.000009", log_pos=4242):
+    class _FakeStream:
+        def __init__(self, **kwargs):
+            self.log_file = log_file
+            self.log_pos = log_pos
+
+        def __iter__(self):
+            return iter(events)
+
+        def close(self):
+            pass
+
+    root = types.ModuleType("pymysqlreplication")
+    root.BinLogStreamReader = _FakeStream
+    row_event = types.ModuleType("pymysqlreplication.row_event")
+    row_event.WriteRowsEvent = WriteRowsEvent
+    row_event.UpdateRowsEvent = UpdateRowsEvent
+    row_event.DeleteRowsEvent = DeleteRowsEvent
+    event = types.ModuleType("pymysqlreplication.event")
+    event.XidEvent = _XidEvent
+    monkeypatch.setitem(sys.modules, "pymysqlreplication", root)
+    monkeypatch.setitem(sys.modules, "pymysqlreplication.row_event", row_event)
+    monkeypatch.setitem(sys.modules, "pymysqlreplication.event", event)
+
+
+def test_capture_groups_rows_by_xid_into_txn_id(monkeypatch):
+    # P2 slice 3: rows between two commits share the enclosing XID as their txn_id;
+    # the commit event flushes and tags the buffered rows. Two transactions -> two ids.
+    w1 = WriteRowsEvent("ORDERS", [{"values": {"ID": 1, "V": "a"}}])
+    w2 = WriteRowsEvent("ORDERS", [{"values": {"ID": 2, "V": "b"}}])
+    w3 = WriteRowsEvent("ORDERS", [{"values": {"ID": 3, "V": "c"}}])
+    _install_txn_reader(monkeypatch, [w1, w2, _XidEvent(5001), w3, _XidEvent(5002)])
+    records, _ = _source().capture("mysql-bin.000001:4")
+    assert [r.key["ID"] for r in records] == [1, 2, 3]
+    assert [r.txn_id for r in records] == [5001, 5001, 5002]  # first txn: 1&2, second: 3
+    # The XID commit terminates each transaction's LAST buffered row (txn_end), so the
+    # replicat can certify a whole txn vs a torn/partial prefix.
+    assert [r.txn_end for r in records] == [False, True, True]
+
+
+def test_capture_rows_without_trailing_xid_are_untagged(monkeypatch):
+    # Rows read before their commit event (a tail) flush UNTAGGED (txn_id None) so
+    # they apply per-record via the barrier, never mis-grouped.
+    w1 = WriteRowsEvent("ORDERS", [{"values": {"ID": 1, "V": "a"}}])
+    w2 = WriteRowsEvent("ORDERS", [{"values": {"ID": 2, "V": "b"}}])
+    _install_txn_reader(monkeypatch, [w1, w2])  # no XID
+    records, _ = _source().capture("mysql-bin.000001:4")
+    assert [r.key["ID"] for r in records] == [1, 2]
+    assert [r.txn_id for r in records] == [None, None]
+    # Untagged tail rows are never terminators (they apply per-record via the barrier).
+    assert [r.txn_end for r in records] == [False, False]
+
+
 def test_capture_single_row_event_keeps_bare_int_pos(monkeypatch):
     # A singleton event stays wire-compatible: a plain int, which orders identically
     # to [base, 0] under source_pos_key.

@@ -81,6 +81,15 @@ class DeleteRowsEvent(_Ev):
     pass
 
 
+class XidEvent:
+    """Fake commit event (a transaction boundary), as ``pymysqlreplication.event``
+    yields. Capture stops the memory cap only at these boundaries so a source
+    transaction is never split across cycles."""
+
+    def __init__(self, xid):
+        self.xid = xid
+
+
 class _Dsn:
     host = "127.0.0.1"
     port = 3306
@@ -108,8 +117,11 @@ def _install_reader(monkeypatch, events_with_pos, log_file="mysql-bin.000003"):
     row_event.WriteRowsEvent = WriteRowsEvent
     row_event.UpdateRowsEvent = UpdateRowsEvent
     row_event.DeleteRowsEvent = DeleteRowsEvent
+    event = types.ModuleType("pymysqlreplication.event")
+    event.XidEvent = XidEvent
     monkeypatch.setitem(sys.modules, "pymysqlreplication", root)
     monkeypatch.setitem(sys.modules, "pymysqlreplication.row_event", row_event)
+    monkeypatch.setitem(sys.modules, "pymysqlreplication.event", event)
 
 
 def _orders():
@@ -119,14 +131,22 @@ def _orders():
 
 
 def test_mysql_capture_stops_at_cap_and_reports_stop_coordinate(monkeypatch):
+    # Each row is its own autocommit transaction (a WriteRowsEvent followed by an
+    # XID commit). The cap is checked only at a commit boundary, so a source txn is
+    # never split: with cap=3 capture stops right after the 3rd transaction commits.
     from any2heliosdb.cdc.sources.mysql_binlog import MySqlBinlogSource
-    events = [(WriteRowsEvent("ORDERS", [{"values": {"ID": i, "V": "a"}}]), 100 + i * 10)
-              for i in range(1, 6)]
+    events = []
+    for i in range(1, 6):
+        events.append((WriteRowsEvent("ORDERS", [{"values": {"ID": i, "V": "a"}}]), 100 + i * 10))
+        events.append((XidEvent(1000 + i), 105 + i * 10))  # commit boundary
     _install_reader(monkeypatch, events)
     src = MySqlBinlogSource(_Dsn(), "db", [_orders()])
     records, new_pos = src.capture("mysql-bin.000003:4", limit=3)
-    assert len(records) == 3                       # stopped after 3 events
-    assert new_pos == "mysql-bin.000003:130"        # the 3rd event's END coordinate
+    assert len(records) == 3                        # stopped after the 3rd commit
+    assert [r.txn_id for r in records] == [1001, 1002, 1003]  # tagged by commit XID
+    # Each single-row autocommit txn's row is its own terminator (last of its XID).
+    assert [r.txn_end for r in records] == [True, True, True]
+    assert new_pos == "mysql-bin.000003:135"         # the 3rd commit's END coordinate
 
 
 def test_mysql_capture_zero_limit_reads_all(monkeypatch):

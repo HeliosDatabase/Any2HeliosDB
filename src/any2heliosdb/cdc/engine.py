@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from ..core.change_record import INSERT, ChangeRecord, source_pos_key
 from ..errors import Any2HeliosError
@@ -551,6 +551,162 @@ def _default_reconcile_deletes(cfg) -> bool:
     return getattr(cfg.source.dialect, "value", cfg.source.dialect) not in _LOG_BASED_DIALECTS
 
 
+def _txn_apply_enabled(cfg, caps) -> bool:
+    """Whether per-source-transaction atomic apply is active this run (P2 slice 3).
+
+    ``[cdc] txn_apply`` gates it: ``off`` disables it everywhere (legacy per-record
+    keymove-barrier apply); ``auto`` (default) / ``on`` enable it ONLY when the live
+    capability probe confirms the target services multi-statement transactions
+    atomically. A txn-incapable target (or an unknown/garbled banner) therefore keeps
+    the barrier path — the fallback is always correct, just per-record. Records that
+    carry no ``txn_id`` (Oracle SCN source, or a pre-upgrade trail) still go through
+    the barrier even when this is enabled, so the decision composes per-record in
+    :func:`_segment_for_apply`.
+    """
+    mode = (getattr(cfg.cdc, "txn_apply", "auto") or "auto").strip().lower()
+    if mode == "off":
+        return False
+    return bool(getattr(caps, "multi_statement_txn", False))
+
+
+def _read_txn_aligned(trail: Trail, start: int, limit: Optional[int],
+                      enabled: bool) -> Tuple[List[ChangeRecord], int]:
+    """Read the next apply chunk, never SPLITTING a source transaction at its edge and
+    never HANDING BACK an uncertified (partial) trailing transaction.
+
+    Two compositions layered on plain :meth:`Trail.read` (which bounds a chunk at
+    ``limit`` LINES and could otherwise cut a source transaction in half):
+
+    * **Overshoot** — when the chunk's last record still belongs to an ongoing tagged
+      transaction, extend the read until that ``txn_id`` changes or the trail ends, so
+      a transaction's records land whole in one chunk (a single transaction larger than
+      ``apply_batch`` is applied whole — the documented per-txn overshoot). Only
+      meaningful when bounded; an unbounded read (``limit is None``) already read the
+      whole remaining slice.
+    * **Certified-complete hold** — a tagged trailing run is atomic-eligible ONLY when
+      it is CERTIFIED complete: its last record carries ``txn_end`` (the source's
+      per-transaction terminator) OR a record with a DIFFERENT ``txn_id`` already
+      follows it in the durable trail. An unterminated tagged run at the very end of
+      the durable trail (a buffered-writer flush that persisted the leading records but
+      not the terminator, or a crash between flush and fsync) is an INCOMPLETE TAIL:
+      it is EXCLUDED this run and the cursor is left BEFORE it — exactly like the
+      torn-tail heal, but for a torn TXN rather than a torn line — so it is never
+      atomically committed as a partial source transaction, nor half-applied via the
+      barrier. It applies next run once its terminator (or the next txn) is durable.
+      See :func:`_hold_incomplete_txn_tail`.
+
+    A no-op (returns the raw read) when atomic apply is off or the chunk is empty.
+    Assumes one trail line == one record within a chunk, the same invariant the
+    per-chunk cursor math already relies on (``append`` writes exactly one line per
+    record; there are no blank lines)."""
+    records, next_cursor = trail.read(start, limit=limit)
+    if not enabled or not records:
+        return records, next_cursor
+    # Overshoot: extend a bounded read so a source transaction is never split at the
+    # chunk edge. (Unbounded reads already hold the whole remaining slice.)
+    if limit is not None and records[-1].txn_id is not None:
+        last_txn = records[-1].txn_id
+        while True:
+            more, nc = trail.read(next_cursor, limit=limit)
+            if not more:
+                break
+            cut = len(more)
+            for j, r in enumerate(more):
+                if r.txn_id != last_txn:
+                    cut = j
+                    break
+            if cut:
+                records.extend(more[:cut])
+            if cut < len(more):
+                # A different txn_id starts at offset ``cut`` — the boundary. Stop and
+                # set the cursor just past the last same-txn record (1 line == 1 record).
+                next_cursor = next_cursor + cut
+                break
+            next_cursor = nc  # whole batch is still this txn; keep extending
+    # Hold an uncertified (partial/pre-fsync) trailing transaction until it is durable.
+    return _hold_incomplete_txn_tail(trail, records, next_cursor)
+
+
+def _hold_incomplete_txn_tail(trail: Trail, records: List[ChangeRecord],
+                              next_cursor: int) -> Tuple[List[ChangeRecord], int]:
+    """Exclude an uncertified trailing tagged transaction from *records* (D2).
+
+    The trailing group is the maximal run at the END of *records* sharing the last
+    record's ``txn_id``. It is CERTIFIED complete — and returned unchanged — when:
+
+    * the last record is untagged (``txn_id`` ``None``): not a transaction, applied
+      per-record by the barrier, so there is nothing to hold; or
+    * the last record carries ``txn_end`` (the source terminator): a whole txn; or
+    * the durable trail already holds a record with a DIFFERENT ``txn_id`` right after
+      ``next_cursor``: the group is followed by another transaction, hence complete.
+
+    Otherwise the group is a partial trailing tail (its terminator was never durably
+    written) and is REMOVED: the returned records stop before it and the cursor is
+    rewound to its first line (one line == one record, no blank lines — the module-wide
+    invariant), so a later run re-reads it once its terminator or the next txn lands.
+    """
+    if not records:
+        return records, next_cursor
+    last = records[-1]
+    if last.txn_id is None or last.txn_end:
+        return records, next_cursor
+    # Not terminated: certified only if a DIFFERENT txn_id is already durably next.
+    nxt, _ = trail.read(next_cursor, limit=1)
+    if nxt and nxt[0].txn_id != last.txn_id:
+        return records, next_cursor
+    # Uncertified trailing tail — hold it: drop the whole trailing same-txn run and
+    # rewind the cursor to its first line so it applies next run (once complete).
+    tid = last.txn_id
+    k = len(records)
+    while k > 0 and records[k - 1].txn_id == tid:
+        k -= 1
+    held = len(records) - k
+    return records[:k], next_cursor - held
+
+
+def _segment_for_apply(records: List[ChangeRecord], rep,
+                       enabled: bool) -> Iterator[Tuple[str, List[ChangeRecord]]]:
+    """Split a chunk into ordered ``("atomic", group)`` / ``("barrier", run)`` segments.
+
+    An ``atomic`` segment is a maximal run of consecutive records sharing one
+    non-``None`` ``txn_id`` whose whole group is **keymove-free** — applied in ONE
+    target transaction by :meth:`Replicat.apply_txn`. Everything else (untagged/legacy
+    records, and any source transaction that CONTAINS a primary-key move) coalesces
+    into ``barrier`` runs applied by :meth:`Replicat.apply_barriered` — the keymove
+    barrier stays fully intact for those. Order is preserved exactly, so a
+    barrier-then-atomic-then-barrier chunk applies in trail order. When atomic apply
+    is disabled the whole chunk is one barrier segment (today's behaviour, unchanged).
+    """
+    if not enabled or not records:
+        if records:
+            yield ("barrier", records)
+        return
+    i, n = 0, len(records)
+    barrier: List[ChangeRecord] = []
+    while i < n:
+        tid = records[i].txn_id
+        if tid is not None:
+            k = i
+            while k < n and records[k].txn_id == tid:
+                k += 1
+            group = records[i:k]
+            if not any(rep._is_keymove(r) for r in group):
+                if barrier:
+                    yield ("barrier", barrier)
+                    barrier = []
+                yield ("atomic", group)
+                i = k
+                continue
+            # A keymove-bearing transaction: keep it on the barrier path.
+            barrier.extend(group)
+            i = k
+            continue
+        barrier.append(records[i])
+        i += 1
+    if barrier:
+        yield ("barrier", barrier)
+
+
 def run_replicat(cfg, name: str, reconcile_deletes: Optional[bool] = None) -> Dict[str, object]:
     from ..config.store import build_source_adapter, build_target_driver, connect_both
     from ..constants import Edition
@@ -652,6 +808,13 @@ def run_replicat(cfg, name: str, reconcile_deletes: Optional[bool] = None) -> Di
                     reg.set_apply_cursor(name, base_cursor + consumed)
                 return _cb
 
+            # Per-source-transaction atomic apply (P2 slice 3): when the target
+            # proves multi-statement transactional atomicity and the trail carries
+            # txn_ids, keymove-free source transactions apply atomically in one
+            # target BEGIN/COMMIT (FK-ordering + all-or-nothing); everything else
+            # (untagged/legacy records, keymove-bearing txns, txn-incapable targets)
+            # keeps the per-record keymove barrier. Gated per-run + per-segment.
+            txn_enabled = _txn_apply_enabled(cfg, caps)
             # The whole read/apply/persist loop runs under the exclusive trail
             # lock: the cursors it persists are GLOBAL line indices, so a purge
             # (or a purge-crash leftover) shifting the index space mid-run would
@@ -662,20 +825,42 @@ def run_replicat(cfg, name: str, reconcile_deletes: Optional[bool] = None) -> Di
                 trail.reconcile_purged()
                 start = ext.apply_cursor
                 while True:
-                    records, next_cursor = trail.read(start, limit=limit)
+                    records, next_cursor = _read_txn_aligned(trail, start, limit, txn_enabled)
                     if not records:
                         if next_cursor != start:
                             # Only trailing blanks / an excluded torn tail remained —
                             # advance the cursor past them so we do not re-scan forever.
                             reg.set_apply_cursor(name, next_cursor)
                         break
-                    a, w = rep.apply_barriered(
-                        records,
-                        on_flush=_flush_from(start),
-                        poison_retries=poison_retries,
-                        on_poison=_poison_cb(start))
-                    applied += a
-                    warnings += w
+                    # Apply the chunk's segments in trail order. ``consumed`` is the
+                    # chunk-relative record offset; the absolute line cursor is
+                    # ``start + consumed`` (one line == one record within a chunk).
+                    consumed = 0
+                    for kind, seg in _segment_for_apply(records, rep, txn_enabled):
+                        base = start + consumed
+                        if kind == "atomic":
+                            # One target transaction; the cursor advances only AFTER
+                            # commit (apply_txn has no mid-txn flush), so persist the
+                            # group's end line here — a crash before this re-applies
+                            # the whole (idempotent) group.
+                            a, w = rep.apply_txn(
+                                seg, poison_retries=poison_retries,
+                                on_poison=_poison_cb(start), base_consumed=consumed)
+                            consumed += len(seg)
+                            reg.set_apply_cursor(name, start + consumed)
+                        else:
+                            # The barrier persists the cursor itself via on_flush
+                            # (isolating each keymove), so no extra set here — a
+                            # keymove-free barrier run flushes once at its end,
+                            # byte-identical to the pre-slice-3 single-segment path.
+                            a, w = rep.apply_barriered(
+                                seg,
+                                on_flush=_flush_from(base),
+                                poison_retries=poison_retries,
+                                on_poison=_poison_cb(base))
+                            consumed += len(seg)
+                        applied += a
+                        warnings += w
                     read_total += len(records)
                     # Make the per-chunk cursor exact (covers any blank line that
                     # would make the record count trail the line count).

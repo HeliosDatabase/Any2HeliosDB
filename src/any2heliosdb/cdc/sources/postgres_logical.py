@@ -184,6 +184,28 @@ def parse_fields(s: str) -> Dict[str, object]:
     return out
 
 
+def _parse_txn_boundary(data: str) -> "Optional[Tuple[str, Optional[int]]]":
+    """Recognize a ``test_decoding`` transaction-boundary line.
+
+    Returns ``("BEGIN", xid)`` for a ``BEGIN <xid>`` line (the xid tags every change
+    record until the matching COMMIT), ``("COMMIT", None)`` for a ``COMMIT …`` line
+    (the transaction ended — records after it are untagged until the next BEGIN), or
+    ``None`` for any other line (a table change, handled by :func:`parse_change`). A
+    malformed/absent xid yields ``("BEGIN", None)`` — the records then apply
+    per-record via the barrier path, never mis-grouped.
+    """
+    s = (data or "").strip()
+    if s.startswith("BEGIN"):
+        rest = s[len("BEGIN"):].strip()
+        try:
+            return ("BEGIN", int(rest))
+        except ValueError:
+            return ("BEGIN", None)
+    if s.startswith("COMMIT"):
+        return ("COMMIT", None)
+    return None
+
+
 def parse_change(data: str, schema: str, pk_by_table: Dict[str, List[str]],
                  known_tables) -> "ChangeRecord | None":
     """Parse one ``test_decoding`` output line into a ChangeRecord, or None for a
@@ -338,13 +360,43 @@ class PostgresLogicalSource:
         # prefix crash within a transaction re-appends only the never-trailed
         # remainder instead of dropping the shared-LSN tail.
         seq_by_base: Dict[int, int] = {}
+        # test_decoding brackets each transaction with ``BEGIN <xid>`` … ``COMMIT
+        # <xid>`` lines (which parse_change returns None for). Track the current xid
+        # so every change record in a transaction is tagged with it (``txn_id``),
+        # letting the replicat regroup the flat trail stream back into source
+        # transactions and apply each atomically. The xid need only be
+        # constant-within-a-txn and different between consecutive txns (it is), never
+        # globally monotonic — source_pos still carries the LSN order for dedup. A
+        # peek never splits a transaction (upto_nchanges is checked at commit
+        # boundaries), so a whole txn's records always arrive within one capture.
+        cur_txn: Optional[int] = None
+        # The most recent change record captured for the current (open) transaction,
+        # so that when its COMMIT line arrives we can mark it as the transaction's LAST
+        # record (``txn_end``) — the durable completeness terminator the replicat uses
+        # to distinguish a whole source transaction from a torn/partial prefix.
+        last_of_txn: Optional[ChangeRecord] = None
         for lsn, data in self.adapter._qall(
                 "SELECT lsn::text, data FROM pg_logical_slot_peek_changes(%s, NULL, {})".format(upto),
                 self.slot):
             if lsn:
                 last_lsn = lsn
+            txn = _parse_txn_boundary(data)
+            if txn is not None:
+                if txn[0] == "COMMIT":
+                    # Transaction ended: terminate its final captured record (if any),
+                    # then clear the open-txn state. A COMMIT with no captured record
+                    # (all rows filtered as unknown-table/PK-less) marks nothing.
+                    if last_of_txn is not None:
+                        last_of_txn.txn_end = True
+                    cur_txn = None
+                    last_of_txn = None
+                else:  # BEGIN <xid> -> tag every change until the matching COMMIT
+                    cur_txn = txn[1]
+                    last_of_txn = None
+                continue
             rec = parse_change(data, self.schema, self._pk, self._known)
             if rec is not None:
+                rec.txn_id = cur_txn
                 # Tag the record with its LSN so the engine can drop it on a
                 # re-peek if a crash lost the slot advance after the trail append.
                 base = lsn_to_int(lsn)
@@ -355,6 +407,11 @@ class PostgresLogicalSource:
                     seq_by_base[base] = seq + 1
                     rec.source_pos = base if seq == 0 else [base, seq]
                 records.append(rec)
+                # Remember this as the txn's latest record; the COMMIT above turns the
+                # last such record into the terminator. Untagged records (no BEGIN)
+                # never become a terminator — they apply per-record via the barrier.
+                if cur_txn is not None:
+                    last_of_txn = rec
         return records, last_lsn, skipped
 
     def epoch_identity(self) -> Optional[str]:

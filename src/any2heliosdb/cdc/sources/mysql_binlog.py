@@ -178,11 +178,15 @@ class MySqlBinlogSource:
         coordinate.
 
         ``limit`` (tier-2 ``capture_batch``) bounds resident memory after a long
-        outage: capture stops at the first event boundary once at least ``limit``
-        change records have accumulated (``0`` = no cap — read until the stream
-        drains, the pre-tier-2 behaviour). Because the returned coordinate is the
-        stream position after the last processed event, the next cycle resumes
-        exactly where this one stopped — cursor semantics are unchanged.
+        outage: capture stops at the first **transaction boundary** (an ``XID``
+        commit event) once at least ``limit`` change records have accumulated
+        (``0`` = no cap — read until the stream drains, the pre-tier-2 behaviour).
+        Stopping only at a commit boundary means a source transaction is never split
+        across capture cycles, so all of its records land together for the replicat's
+        per-transaction atomic apply. Because the returned coordinate is the stream
+        position after the last processed event, the next cycle resumes exactly where
+        this one stopped — cursor semantics are unchanged. One huge transaction is
+        still materialized whole (the same documented per-txn overshoot as PG).
         """
         if not position:
             # First cycle: anchor at the current position, capture nothing yet.
@@ -194,17 +198,56 @@ class MySqlBinlogSource:
             UpdateRowsEvent,
             WriteRowsEvent,
         )
+        # XidEvent marks an InnoDB commit; grouping the flat row stream by it lets
+        # the replicat regroup source transactions and apply each atomically. It
+        # lives in ``pymysqlreplication.event``; import defensively so a hermetic
+        # fake (which stubs only ``row_event``) and any absent optional dep degrade
+        # to untagged per-record capture rather than erroring.
+        try:
+            from pymysqlreplication.event import XidEvent
+        except Exception:  # noqa: BLE001 - optional; grouping simply disabled
+            XidEvent = None
 
         log_file, _, log_pos = position.rpartition(":")
+        only_events = [WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent]
+        if XidEvent is not None:
+            only_events.append(XidEvent)
         stream = BinLogStreamReader(
             connection_settings=self._conn_settings(), server_id=self.server_id,
             only_schemas=[self.schema], only_tables=self._tables,
-            only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent],
+            only_events=only_events,
             log_file=log_file, log_pos=int(log_pos), resume_stream=True, blocking=False)
         records: List[ChangeRecord] = []
+        # Rows of the in-progress transaction are buffered here and stamped with the
+        # transaction's XID (``txn_id``) on its commit event, then moved to
+        # ``records``. ``records`` therefore only grows at commit boundaries.
+        txn_buf: List[ChangeRecord] = []
+
+        def _flush(txn_id) -> None:
+            # A real XID commit (txn_id not None) terminates the transaction: mark its
+            # LAST buffered row as ``txn_end`` — the durable completeness terminator the
+            # replicat uses to tell a whole txn from a torn/partial prefix. The tail
+            # flush of uncommitted rows (txn_id None) sets no terminator; those rows are
+            # untagged and apply per-record via the barrier.
+            if txn_buf and txn_id is not None:
+                txn_buf[-1].txn_end = True
+            for r in txn_buf:
+                r.txn_id = txn_id
+            records.extend(txn_buf)
+            txn_buf.clear()
+
         cap = int(limit) if limit and int(limit) > 0 else 0
         try:
             for ev in stream:
+                if XidEvent is not None and isinstance(ev, XidEvent):
+                    # Commit boundary: tag this transaction's buffered rows with its
+                    # XID and flush. Only bound memory HERE (a transaction is never
+                    # split); the coordinate below is this commit's END, so the next
+                    # cycle resumes after the whole committed transaction.
+                    _flush(getattr(ev, "xid", None))
+                    if cap and len(records) >= cap:
+                        break
+                    continue
                 tbl = ev.table
                 pk = self._pk.get(tbl, [])
                 expected = self._cols.get(tbl, [])
@@ -226,7 +269,7 @@ class MySqlBinlogSource:
                     if isinstance(ev, WriteRowsEvent):
                         vals = row["values"]
                         _check_image_columns(tbl, "INSERT", vals.keys(), expected)
-                        records.append(ChangeRecord(op=INSERT, schema=self.schema, table=tbl,
+                        txn_buf.append(ChangeRecord(op=INSERT, schema=self.schema, table=tbl,
                                                     key={k: vals.get(k) for k in pk}, after=dict(vals),
                                                     source_pos=pos))
                     elif isinstance(ev, UpdateRowsEvent):
@@ -250,7 +293,7 @@ class MySqlBinlogSource:
                                 "binlog_row_image=FULL; set it on the source and "
                                 "re-anchor.".format(tbl))
                         old_key = {k: before.get(k) for k in pk} if before else {}
-                        records.append(ChangeRecord(
+                        txn_buf.append(ChangeRecord(
                             op=UPDATE, schema=self.schema, table=tbl,
                             key=new_key, after=dict(vals),
                             before_key=(old_key if pk and old_key != new_key else {}),
@@ -260,14 +303,13 @@ class MySqlBinlogSource:
                         # Delete only needs a sound key, but UNKNOWN_COL / missing PK
                         # still signals a non-FULL image, so verify the key columns.
                         _check_image_columns(tbl, "DELETE", vals.keys(), pk)
-                        records.append(ChangeRecord(op=DELETE, schema=self.schema, table=tbl,
+                        txn_buf.append(ChangeRecord(op=DELETE, schema=self.schema, table=tbl,
                                                     key={k: vals.get(k) for k in pk}, after={},
                                                     source_pos=pos))
-                # Bound resident memory: stop at this event boundary once the cap is
-                # reached. The coordinate below is this event's END, so the next
-                # cycle resumes exactly after it (no event is split or lost).
-                if cap and len(records) >= cap:
-                    break
+            # Any rows still buffered had no closing commit event (a non-transactional
+            # engine, or a tail read before its XID): flush them UNTAGGED so they apply
+            # per-record via the barrier path — never mis-grouped into a fake txn.
+            _flush(None)
             new_pos = "{}:{}".format(stream.log_file, stream.log_pos)
         finally:
             stream.close()

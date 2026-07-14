@@ -117,6 +117,7 @@ def load_config(path: str) -> ProjectConfig:
         poison_retries=int(cdc_d.get("poison_retries", 3)),
         poison_max_per_run=int(cdc_d.get("poison_max_per_run", 25)),
         trail_rotate_mb=int(cdc_d.get("trail_rotate_mb", 256)),
+        txn_apply=str(cdc_d.get("txn_apply", "auto")),
     )
     return ProjectConfig(
         source=source, target=target, options=options, cdc=cdc,

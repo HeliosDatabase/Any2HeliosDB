@@ -70,7 +70,7 @@ _CONFIG_PROP: Dict[str, Dict[str, Any]] = {
     "target": {"type": "object", "description": "Inline [target] config block."},
     "options": {"type": "object", "description": "Inline [options] config block."},
     "cdc": {"type": "object", "description": "Inline [cdc] tuning block (capture_batch, "
-            "apply_batch, poison_retries, poison_max_per_run, trail_rotate_mb)."},
+            "apply_batch, poison_retries, poison_max_per_run, trail_rotate_mb, txn_apply)."},
     "data_type": {"type": "object", "description": "Ora2Pg-style DATA_TYPE overrides."},
     "modify_type": {"type": "object", "description": "Ora2Pg-style MODIFY_TYPE overrides."},
 }

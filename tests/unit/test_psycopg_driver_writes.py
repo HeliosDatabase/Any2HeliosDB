@@ -283,3 +283,85 @@ def test_truncate_renders_truncate_table():
     d = _driver()
     d.truncate("hr.emp")
     assert _cur(d).sql == ["TRUNCATE TABLE hr.emp"]
+
+
+# --- per-source-transaction composition (P2 slice 3) -------------------------
+
+
+class _TxnConn(_FakeConn):
+    """Fake conn that tracks commit/rollback and how often ``transaction()`` is
+    entered — so we can prove the apply-seam methods join the OUTER replicat
+    transaction (no nested committing scope) while ``begin()`` is in effect."""
+
+    def __init__(self, rowcounts=None):
+        super().__init__(rowcounts)
+        self.commits = 0
+        self.rollbacks = 0
+        self.tx_entered = 0
+
+    def transaction(self):
+        outer = self
+
+        class _TX:
+            def __enter__(self):
+                outer.tx_entered += 1
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return _TX()
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+def _txn_driver(rowcounts=None):
+    d = PsycopgDriver(TargetDsn())
+    d._conn = _TxnConn(rowcounts)
+    return d
+
+
+def test_begin_sets_in_txn_and_disables_autocommit():
+    d = _txn_driver()
+    assert d._in_txn is False and d._conn.autocommit is True
+    d.begin()
+    assert d._in_txn is True and d._conn.autocommit is False
+
+
+def test_commit_and_rollback_clear_in_txn_and_restore_autocommit():
+    d = _txn_driver()
+    d.begin()
+    d.commit()
+    assert d._in_txn is False and d._conn.autocommit is True and d._conn.commits == 1
+    d.begin()
+    d.rollback()
+    assert d._in_txn is False and d._conn.autocommit is True and d._conn.rollbacks == 1
+
+
+def test_apply_seam_joins_outer_txn_without_nested_scope():
+    # Inside begin()..commit() the apply-seam calls must NOT open their own
+    # committing conn.transaction() — they join the open replicat transaction and
+    # commit atomically at commit().
+    d = _txn_driver()
+    d.begin()
+    d.upsert("t", ["id"], ["id", "v"], [(1, "a")])
+    d.update_columns("t", ["id"], ["v"], [("b", 1)])
+    d.delete_keys("t", ["id"], [(2,)])
+    assert d._conn.tx_entered == 0        # no nested committing scope while in txn
+    assert d._conn.commits == 0           # nothing committed until the replicat commits
+    d.commit()
+    assert d._conn.commits == 1
+
+
+def test_apply_seam_outside_txn_uses_own_transaction_scope():
+    # The pre-slice-3 path is unchanged: each apply-seam call opens its own
+    # autocommitting conn.transaction().
+    d = _txn_driver()
+    d.upsert("t", ["id"], ["id", "v"], [(1, "a")])
+    d.delete_keys("t", ["id"], [(2,)])
+    assert d._conn.tx_entered == 2        # one committing scope per call
+    assert d._conn.commits == 0           # conn.transaction() handles its own commit

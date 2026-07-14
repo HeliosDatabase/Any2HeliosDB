@@ -277,3 +277,45 @@ def test_capture_records_sharing_one_lsn_get_compound_source_pos():
     assert [r.source_pos for r in records] == [base, [base, 1], [base, 2]]
     keys = [source_pos_key(r.source_pos) for r in records]
     assert keys == sorted(keys) and len(set(keys)) == 3    # strict total order
+
+
+def test_capture_tags_records_with_begin_xid_as_txn_id():
+    # P2 slice 3: every change between BEGIN <xid> and COMMIT is tagged with that
+    # xid (txn_id), so the replicat can regroup source transactions. Two txns get
+    # two distinct ids; a record between them (after COMMIT, before the next BEGIN)
+    # would be untagged.
+    from any2heliosdb.cdc.sources.postgres_logical import PostgresLogicalSource
+    rows = [
+        ("0/10", "BEGIN 700"),
+        ("0/12", "table public.actor: INSERT: actor_id[integer]:1"),
+        ("0/14", "table public.actor: INSERT: actor_id[integer]:2"),
+        ("0/16", "COMMIT 700"),
+        ("0/20", "BEGIN 701"),
+        ("0/22", "table public.actor: INSERT: actor_id[integer]:3"),
+        ("0/26", "COMMIT 701"),
+    ]
+    records, _, _ = PostgresLogicalSource(
+        _FakeAdapter(rows), "public", [_actor_table()], "e1").capture()
+    assert [r.key["actor_id"] for r in records] == [1, 2, 3]
+    assert [r.txn_id for r in records] == [700, 700, 701]
+    # The COMMIT line terminates each transaction's LAST record (txn_end), so the
+    # replicat can certify a whole txn vs a torn/partial prefix. Non-final records
+    # of a txn are not terminated.
+    assert [r.txn_end for r in records] == [False, True, True]
+
+
+def test_capture_untagged_before_any_begin_and_after_malformed_xid():
+    # A change with no enclosing BEGIN (or a BEGIN with a non-integer xid) is
+    # untagged (txn_id None) -> it applies per-record via the barrier, never
+    # mis-grouped into a fake transaction.
+    from any2heliosdb.cdc.sources.postgres_logical import PostgresLogicalSource
+    rows = [
+        ("0/12", "table public.actor: INSERT: actor_id[integer]:1"),  # no BEGIN yet
+        ("0/14", "BEGIN notanumber"),
+        ("0/16", "table public.actor: INSERT: actor_id[integer]:2"),
+    ]
+    records, _, _ = PostgresLogicalSource(
+        _FakeAdapter(rows), "public", [_actor_table()], "e1").capture()
+    assert [r.txn_id for r in records] == [None, None]
+    # Untagged records are never terminators (they apply per-record via the barrier).
+    assert [r.txn_end for r in records] == [False, False]

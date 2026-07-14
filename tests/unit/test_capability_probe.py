@@ -20,7 +20,7 @@ this pins:
 from __future__ import annotations
 
 from any2heliosdb.constants import Edition
-from any2heliosdb.target.capability import probe_capabilities
+from any2heliosdb.target.capability import _probe_multi_statement_txn, probe_capabilities
 
 
 class _FakeCursor:
@@ -155,5 +155,79 @@ def test_accepts_dict_mirrors_probed_capabilities():
     assert cm.accepts["copy_from_stdin"] is True
     assert cm.accepts["concurrent_writes"] is True
     assert cm.accepts["version"] is cm.has_version_function
+    assert "multi_statement_txn" in cm.accepts
     # the enforcement verdicts flow through the accepts map too
     assert cm.accepts["enforces_check"] is False
+
+
+# --- multi_statement_txn probe (P2 slice 3) ----------------------------------
+
+
+class _TxnProbeCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self._result = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql):
+        s = sql.strip().upper()
+        if s.startswith("DROP") or s.startswith("CREATE"):
+            self.conn.committed = 0
+            self.conn.pending = 0
+        elif s.startswith("INSERT"):
+            # A non-atomic target writes immediately (ignores the open txn); an
+            # atomic one stages the write until commit.
+            if self.conn.autocommit or not self.conn.atomic:
+                self.conn.committed += 1
+            else:
+                self.conn.pending += 1
+        elif s.startswith("SELECT"):
+            self._result = self.conn.committed
+
+    def fetchone(self):
+        return (self._result,)
+
+
+class _TxnProbeConn:
+    """Models a target that either commits/rolls back atomically (``atomic=True``)
+    or silently autocommits every write (``atomic=False``)."""
+
+    def __init__(self, atomic=True):
+        self.atomic = atomic
+        self.autocommit = False
+        self.committed = 0
+        self.pending = 0
+
+    def cursor(self):
+        return _TxnProbeCursor(self)
+
+    def commit(self):
+        self.committed += self.pending
+        self.pending = 0
+
+    def rollback(self):
+        self.pending = 0
+
+
+def test_multi_statement_txn_probe_true_on_atomic_target():
+    conn = _TxnProbeConn(atomic=True)
+    assert _probe_multi_statement_txn(conn) is True
+    assert conn.autocommit is False   # prior autocommit restored
+
+
+def test_multi_statement_txn_probe_false_on_autocommitting_target():
+    # A target that ignores ROLLBACK (the write survives) must fail the probe, so
+    # the replicat keeps the per-record keymove-barrier apply.
+    conn = _TxnProbeConn(atomic=False)
+    assert _probe_multi_statement_txn(conn) is False
+
+
+def test_multi_statement_txn_probe_false_and_safe_when_txn_ops_unsupported():
+    # A conn with no commit/rollback (an old fake / restricted target) must not
+    # crash the probe — it returns False (fall back to per-record apply).
+    assert _probe_multi_statement_txn(_FakeConn()) is False
