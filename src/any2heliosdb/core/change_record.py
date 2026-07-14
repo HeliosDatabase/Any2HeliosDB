@@ -145,6 +145,31 @@ class ChangeRecord:
     # serialized only when present, so legacy trails and readers that predate the
     # field are unaffected.
     source_pos: Optional[SourcePos] = None
+    # Source-transaction id: an opaque, per-source-transaction tag so the replicat
+    # can regroup the trail's flat per-row stream back into the transactions the
+    # source committed and apply each one atomically (intra-transaction FK-ordering
+    # + per-txn all-or-nothing apply). ALL records of one source commit share this
+    # value; it changes at every commit boundary. It need only be constant-within-a-
+    # txn and different between CONSECUTIVE txns — NOT globally monotonic — so the
+    # log-based sources use the natural id at hand (PostgreSQL: the ``BEGIN``/
+    # ``COMMIT`` xid; MySQL binlog: the commit ``XID``). ``None`` when the source has
+    # no transaction boundaries (Oracle SCN-watermark capture) or predates this field
+    # (legacy trails); such records apply one-per-implicit-txn exactly as before.
+    # Serialized only when present, so legacy trails and old readers are byte-for-byte
+    # unaffected — full backward/forward compatibility.
+    txn_id: Optional[int] = None
+    # Whether this record is the LAST one of its source transaction — the durable
+    # completeness terminator the replicat needs to know a tagged run is a WHOLE
+    # transaction, not a torn/partial prefix left by a buffered-writer flush or a
+    # crash between flush and fsync. The log-based sources set it on each txn's
+    # final record (PostgreSQL: the record before COMMIT resets the xid; MySQL: the
+    # last row of each XID commit); Oracle/untagged records never set it. Without a
+    # terminator (and not yet followed by a different txn_id in the durable trail) a
+    # trailing tagged run is an INCOMPLETE TAIL and is HELD — never atomically
+    # committed — until its terminator (or the next txn) is durable. ``False`` for
+    # every legacy/untagged record; ``_encode`` OMITS it when False so those lines
+    # stay byte-for-byte identical and old readers ignore the unknown key.
+    txn_end: bool = False
 
     def to_json(self) -> str:
         d = {
@@ -157,6 +182,12 @@ class ChangeRecord:
             d["before_key"] = {k: _encode(v) for k, v in self.before_key.items()}
         if self.source_pos is not None:
             d["source_pos"] = self.source_pos
+        if self.txn_id is not None:
+            d["txn_id"] = self.txn_id
+        # Emit the terminator only when set (default False), so a non-terminating /
+        # untagged / legacy record serializes byte-for-byte as before this field.
+        if self.txn_end:
+            d["txn_end"] = True
         return json.dumps(d, separators=(",", ":"))
 
     @classmethod
@@ -169,6 +200,9 @@ class ChangeRecord:
             scn=int(d.get("scn", 0)), commit_ts=d.get("commit_ts", ""),
             before_key={k: _decode(v) for k, v in d.get("before_key", {}).items()},
             source_pos=d.get("source_pos"),
+            txn_id=d.get("txn_id"),
+            # Absent -> False, so legacy/untagged lines decode exactly as before.
+            txn_end=bool(d.get("txn_end", False)),
         )
 
 

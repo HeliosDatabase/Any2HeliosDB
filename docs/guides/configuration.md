@@ -104,6 +104,7 @@ accept the defaults.
 | `poison_retries` | int | `3` | How many times the replicat retries a single failing **non-keymove** record before moving it to `dead_letter.jsonl` (beside the trail) and advancing past it, so one bad record can't wedge replication forever. Before parking a record the replicat `ping()`s the target and re-raises (cursor unmoved) if it is unreachable — a transient outage never dead-letters the backlog. `0` disables the policy — a failing record raises, as before. **Keymoves are never dead-lettered** (skipping one diverges key state); a keymove failure always fails closed. |
 | `poison_max_per_run` | int | `25` | Mass-poison circuit breaker: if one `replicat` run would dead-letter more than this many records it raises instead (cursor unmoved for the offending chunk). A flood of poison usually means an environment fault, not bad data. `0` disables the breaker. |
 | `trail_rotate_mb` | int | `256` | Rotate the active trail segment once it reaches this many MB; closed segments become `trail.NNNNN.jsonl`. The apply cursor stays a single **global line index** across segments, so a legacy single-file trail and its integer cursor keep working unchanged. `0` disables rotation (one `trail.jsonl`). Reclaim applied segments with `a2h extract NAME --purge-applied`. |
+| `txn_apply` | str | `"auto"` | Per-source-transaction atomic apply. Log-based capture tags each record with its source-transaction id (`txn_id`); when this is on **and** the target proves it services multi-statement transactions atomically (the `multi_statement_txn` capability probe), the replicat applies each **keymove-free** source transaction inside one target `BEGIN`/`COMMIT` — all-or-nothing per commit, with intra-transaction FK-ordering preserved. `"auto"` (default) enables it wherever the probe confirms atomicity and the trail carries `txn_id`s; `"on"` is the same gate stated explicitly; `"off"` forces the legacy per-record apply. Pre-upgrade trails, the Oracle SCN source, and txn-incapable targets fall back transparently to the keymove-barrier apply. A transaction that **contains a primary-key move** (a re-keyed parent) always stays on the barrier path — see [FK ordering](../cdc.md#fk-ordering-per-source-transaction-atomic-apply). |
 
 ```toml
 [cdc]
@@ -112,6 +113,7 @@ apply_batch = 10000
 poison_retries = 3
 poison_max_per_run = 25
 trail_rotate_mb = 256
+txn_apply = "auto"
 ```
 
 See [Change data capture](../cdc.md) for the operational workflow behind each

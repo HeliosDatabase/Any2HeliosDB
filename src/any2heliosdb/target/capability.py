@@ -50,6 +50,58 @@ def _drop_all(conn: "psycopg.Connection") -> None:
             pass
 
 
+def _probe_multi_statement_txn(conn: "psycopg.Connection") -> bool:
+    """Live-probe whether *conn* services a multi-statement transaction atomically.
+
+    Turns autocommit OFF, then: BEGIN implicitly, INSERT a row, ROLLBACK — the row
+    must be GONE (proves rollback undoes an uncommitted write); then INSERT, COMMIT
+    — the row must be PRESENT (proves commit lands). A target that silently
+    autocommits (row survives the rollback) or drops committed data fails the probe
+    and the replicat keeps the per-record keymove-barrier apply. Self-cleaning and
+    autocommit-state-restoring; any exception -> ``False`` (fail safe, not closed:
+    the fallback path is always correct, just per-record).
+    """
+    tbl = _PREFIX + "txn"
+    prev_autocommit = conn.autocommit
+    try:
+        conn.autocommit = True
+        with conn.cursor() as c:
+            c.execute("DROP TABLE IF EXISTS {}".format(tbl))
+            c.execute("CREATE TABLE {} (n int)".format(tbl))
+        conn.autocommit = False
+        # (1) a rolled-back write must vanish.
+        with conn.cursor() as c:
+            c.execute("INSERT INTO {} VALUES (1)".format(tbl))
+        conn.rollback()
+        with conn.cursor() as c:
+            c.execute("SELECT count(*) FROM {}".format(tbl))
+            row = c.fetchone()
+            after_rollback = row[0] if row else None
+        # (2) a committed write must land.
+        with conn.cursor() as c:
+            c.execute("INSERT INTO {} VALUES (2)".format(tbl))
+        conn.commit()
+        with conn.cursor() as c:
+            c.execute("SELECT count(*) FROM {}".format(tbl))
+            row = c.fetchone()
+            after_commit = row[0] if row else None
+        return after_rollback == 0 and after_commit == 1
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        try:
+            conn.autocommit = True
+            with conn.cursor() as c:
+                c.execute("DROP TABLE IF EXISTS {}".format(tbl))
+        except Exception:
+            pass
+        conn.autocommit = prev_autocommit
+
+
 def probe_capabilities(conn: "psycopg.Connection", banner: str) -> CapabilityMatrix:
     """Probe *conn* (a psycopg connection) and return its capability matrix."""
     cm = CapabilityMatrix(raw_banner=banner)
@@ -145,6 +197,16 @@ def probe_capabilities(conn: "psycopg.Connection", banner: str) -> CapabilityMat
             cm.materialized_views = True
         attempt("DROP MATERIALIZED VIEW IF EXISTS {}mv".format(_PREFIX))
 
+        # Multi-statement transaction atomicity: the CDC replicat's per-source-txn
+        # atomic apply gates on this. A rolled-back write MUST leave no row, and a
+        # committed write MUST land — probed live (the Apache editions' PG-wire
+        # BEGIN/COMMIT is real, but we never assume it; a target that silently
+        # autocommits or ignores ROLLBACK stays on the per-record apply path). The
+        # probe self-manages autocommit internally (saves the current mode, flips it
+        # off for the BEGIN/ROLLBACK/COMMIT sequence, restores it), so it is correct
+        # regardless of the autocommit state at this call site.
+        cm.multi_statement_txn = _probe_multi_statement_txn(conn)
+
         # CHECK enforcement: a violating insert must be rejected
         if attempt("CREATE TABLE {}chk (n int CHECK (n > 0))".format(_PREFIX)):
             inserted_bad = attempt("INSERT INTO {}chk VALUES (-1)".format(_PREFIX))
@@ -172,6 +234,7 @@ def probe_capabilities(conn: "psycopg.Connection", banner: str) -> CapabilityMat
         "copy_from_stdin": cm.copy_from_stdin,
         "copy_binary": cm.copy_binary,
         "concurrent_writes": cm.concurrent_writes,
+        "multi_statement_txn": cm.multi_statement_txn,
         "on_conflict": cm.on_conflict,
         "returning": cm.returning,
         "merge": cm.merge,

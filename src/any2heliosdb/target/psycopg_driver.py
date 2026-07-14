@@ -6,8 +6,9 @@ for translating the source dialect before handing SQL/data to this driver.
 from __future__ import annotations
 
 import datetime as _dt
+from contextlib import contextmanager
 from decimal import Decimal
-from typing import Any, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from ..core.identifiers import quote_ident, quote_table  # noqa: F401  (re-export)
 from ..errors import TargetConnectionError
@@ -44,6 +45,13 @@ class PsycopgDriver(TargetDriver):
     def __init__(self, dsn: TargetDsn) -> None:
         super().__init__(dsn)
         self._conn: Any = None
+        # True between begin() and commit()/rollback(): the CDC replicat's
+        # per-source-transaction atomic apply brackets several apply-seam calls in
+        # one target transaction. While set, the apply-seam methods run their
+        # statements on the open transaction instead of each opening a self-
+        # committing ``conn.transaction()`` block (see _apply_scope). Byte-identical
+        # behaviour when False — every pre-existing call site leaves it False.
+        self._in_txn = False
 
     # --- lifecycle -------------------------------------------------------
     def connect(self) -> None:
@@ -143,12 +151,32 @@ class PsycopgDriver(TargetDriver):
     def begin(self) -> None:
         if self.conn.autocommit:
             self.conn.autocommit = False
+        self._in_txn = True
 
     def commit(self) -> None:
         self.conn.commit()
+        self._in_txn = False
+        # Restore the autocommit-per-statement default the driver otherwise runs in
+        # (COPY/load_range/insert_rows all rely on their own ``conn.transaction()``).
+        self.conn.autocommit = True
 
     def rollback(self) -> None:
         self.conn.rollback()
+        self._in_txn = False
+        self.conn.autocommit = True
+
+    @contextmanager
+    def _apply_scope(self) -> Iterator[None]:
+        """Transaction scope for one apply-seam call (upsert/update_columns/
+        delete_keys). Inside an explicit replicat transaction (``begin()`` called)
+        the statements join that open transaction and commit atomically at the
+        replicat's ``commit()``; otherwise each call is its own autocommitting
+        ``conn.transaction()`` — the pre-existing, byte-identical behaviour."""
+        if self._in_txn:
+            yield
+        else:
+            with self.conn.transaction():
+                yield
 
     # --- bulk load -------------------------------------------------------
     def copy_rows(
@@ -261,7 +289,7 @@ class PsycopgDriver(TargetDriver):
             action = sql.SQL("DO UPDATE SET {}").format(sets)
         else:
             action = sql.SQL("DO NOTHING")
-        with self.conn.transaction():
+        with self._apply_scope():
             with self.conn.cursor() as cur:
                 for row in by_key.values():
                     vals = sql.SQL(", ").join(sql.Literal(v) for v in row)
@@ -294,7 +322,7 @@ class PsycopgDriver(TargetDriver):
         nset = len(set_cols)
         table = sql.SQL(quote_table(target_table))
         updated = 0
-        with self.conn.transaction():
+        with self._apply_scope():
             with self.conn.cursor() as cur:
                 for r in materialized:
                     setvals, keyvals = r[:nset], r[nset:]
@@ -326,7 +354,7 @@ class PsycopgDriver(TargetDriver):
         # "deleted N". rowcount is -1 only when the server reports no tag count.
         deleted = 0
         table = sql.SQL(quote_table(target_table))
-        with self.conn.transaction():
+        with self._apply_scope():
             with self.conn.cursor() as cur:
                 for k in materialized:
                     conds = sql.SQL(" AND ").join(

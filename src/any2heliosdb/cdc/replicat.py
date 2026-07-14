@@ -195,6 +195,90 @@ class Replicat:
         flush_batch()
         return total_applied, warnings
 
+    def apply_txn(
+        self,
+        records: List[ChangeRecord],
+        poison_retries: int = 0,
+        on_poison: Optional[Callable[[ChangeRecord, str, int], bool]] = None,
+        base_consumed: int = 0,
+    ) -> Tuple[int, List[str]]:
+        """Apply one source transaction's records atomically in ONE target transaction.
+
+        ``records`` is a **keymove-free** group sharing a source ``txn_id`` (the
+        engine routes any transaction that contains a primary-key move to the barrier
+        path instead). Bracketing the whole group in a single ``begin()`` …
+        :meth:`apply_ordered` … ``commit()`` makes a source commit land all-or-nothing
+        AND preserves its exact intra-transaction ordering across tables on an
+        FK-enforcing target — the FK-ordering fix. It applies via :meth:`apply_ordered`
+        (STRICT trail order, coalescing only contiguous same-``(table, kind)`` runs),
+        NOT :meth:`apply` — :meth:`apply` buckets by table, which would reorder a
+        cross-table ``INSERT parent; INSERT child; DELETE child; DELETE parent`` into
+        per-table groups and FK-violate an immediate-checking target mid-transaction.
+
+        Exactly-once WITHOUT the keymove barrier: because the group has no keymove, a
+        whole-group RE-APPLY is idempotent (full upserts overwrite, partial
+        ``update_columns`` re-set the same values, deletes no-op) — so advancing the
+        apply cursor only AFTER ``commit()`` is safe even across the
+        committed-then-cursor-not-yet-persisted crash window (the one window the
+        barrier exists to cover for a keymove). The engine persists the cursor at the
+        group's end line after this returns.
+
+        Poison policy at **transaction granularity** (atomicity forbids skipping a
+        single mid-txn record): a failing group ``rollback()``s and retries the WHOLE
+        group ``poison_retries`` times; if it still fails, the target is ``ping()``ed
+        — a dead target raises (transient outage, cursor unmoved, whole txn retried
+        next run) rather than dead-lettering a healthy backlog — otherwise the ENTIRE
+        group is dead-lettered as a unit and the cursor advances past it. With poison
+        off the failure re-raises (fail closed), exactly like the per-record path.
+        ``base_consumed`` is the group's chunk-relative start offset so each record's
+        dead-letter cursor is recorded correctly.
+        """
+        poison_on = poison_retries > 0 and on_poison is not None
+        attempts = max(1, poison_retries) if poison_on else 1
+        last_err: Optional[BaseException] = None
+        for _ in range(attempts):
+            self.target.begin()
+            try:
+                a, w = self.apply_ordered(records)
+                self.target.commit()
+                return a, w
+            except Exception as e:  # noqa: BLE001 - roll back and retry/dead-letter the txn
+                try:
+                    self.target.rollback()
+                except Exception:  # noqa: BLE001 - surface the original failure below
+                    pass
+                last_err = e
+        if not poison_on or on_poison is None:
+            assert last_err is not None
+            raise last_err
+        # Distinguish a sick target from genuine poison (mirror _apply_isolating_poison):
+        # ping before parking the whole transaction; a failing ping is an outage.
+        try:
+            self.target.ping()
+        except Exception as pe:  # noqa: BLE001
+            r0 = records[0]
+            raise Any2HeliosError(
+                "CDC replicat: target became unreachable while applying a source "
+                "transaction (first record {}.{} key={}); treating this as a transient "
+                "outage, not poison — leaving the apply cursor unmoved so the next run "
+                "retries the whole transaction rather than dead-lettering the backlog "
+                "against a dead target. Underlying apply error: {}".format(
+                    r0.schema, r0.table, r0.key, last_err)) from pe
+        reason = "{}: {} (whole source transaction dead-lettered)".format(
+            type(last_err).__name__, last_err)
+        warnings: List[str] = []
+        for j, r in enumerate(records):
+            newly = on_poison(r, reason, base_consumed + j + 1)
+            if newly:
+                warnings.append(
+                    "dead-lettered {}.{} key={} (source txn, {} attempt(s)): {}".format(
+                        r.schema, r.table, r.key, attempts, last_err))
+            else:
+                warnings.append(
+                    "skipped already-dead-lettered {}.{} key={}".format(
+                        r.schema, r.table, r.key))
+        return 0, warnings
+
     def _apply_isolating_poison(
         self,
         batch: List[ChangeRecord],
@@ -296,6 +380,91 @@ class Replicat:
                 else:  # keymove
                     applied += self._apply_keymove(target_table, key_cols, pk, cols, run)
         return applied, warnings
+
+    def apply_ordered(self, records: List[ChangeRecord]) -> Tuple[int, List[str]]:
+        """Apply *records* in STRICT trail arrival order ACROSS tables.
+
+        Unlike :meth:`apply` — which buckets records by table and applies one whole
+        table at a time — this walks the records exactly as the source committed
+        them and coalesces ONLY a maximal contiguous run that shares the SAME
+        ``(table, op-kind)``: a table change OR an op-kind change flushes the current
+        run. That preserves the cross-table order a source transaction relies on for
+        FK correctness (``INSERT parent`` before ``INSERT child``; ``DELETE child``
+        before ``DELETE parent``) while still coalescing same-table same-kind
+        neighbours into one driver round-trip. It reuses the very same per-kind
+        primitives as :meth:`apply` (``delete_keys`` / ``upsert`` /
+        :meth:`_apply_partial`) via :meth:`_apply_kind_run`.
+
+        Used only by :meth:`apply_txn`, whose groups are **keymove-free** (the engine
+        routes any keymove-bearing transaction to the barrier), so a keymove reaching
+        here is a broken invariant — guard it with a raise rather than silently
+        mis-applying. PK-less / unknown-table records are skipped-and-warned exactly
+        like :meth:`apply` (aggregated per table). :meth:`apply` itself is left
+        byte-identical — the barrier path still relies on its table-bucketing.
+        """
+        applied = 0
+        warnings: List[str] = []
+        run: List[ChangeRecord] = []
+        run_t = None
+        run_tname = ""
+        run_kind = ""
+        skipped: Dict[str, int] = {}
+
+        def flush() -> None:
+            nonlocal applied
+            if run:
+                applied += self._apply_kind_run(run_t, run_kind, run)
+                run.clear()
+
+        for r in records:
+            tname = r.table.upper()
+            t = self._by_name.get(tname)
+            if t is None or not (t.primary_key and t.primary_key.columns):
+                # A PK-less/unknown table breaks the current run and is skip-warned.
+                flush()
+                run_t, run_tname, run_kind = None, "", ""
+                skipped[r.table] = skipped.get(r.table, 0) + 1
+                continue
+            pk = list(t.primary_key.columns)
+            cols = [c.name for c in t.columns]
+            kind = _classify(r, pk, cols)
+            if kind == "keymove":
+                raise Any2HeliosError(
+                    "CDC replicat: a keymove for {}.{} reached the atomic per-transaction "
+                    "apply path, which is guaranteed keymove-free (the engine routes any "
+                    "keymove-bearing source transaction to the keymove barrier). This is an "
+                    "internal invariant violation — refusing to apply it out of order.".format(
+                        r.schema, r.table))
+            if run and (tname != run_tname or kind != run_kind):
+                flush()
+            run_t, run_tname, run_kind = t, tname, kind
+            run.append(r)
+        flush()
+        for tname, n in skipped.items():
+            warnings.append("{}: no primary key; skipped {} change(s)".format(tname, n))
+        return applied, warnings
+
+    def _apply_kind_run(self, t, kind: str, run: List[ChangeRecord]) -> int:
+        """Apply one contiguous same-``(table, kind)`` run via the per-kind primitive.
+
+        Shared by :meth:`apply_ordered`; mirrors the per-kind dispatch inside
+        :meth:`apply` (kept inline there to leave that method byte-identical). *t* is
+        the resolved (PK-bearing) table metadata for every record in *run*. ``keymove``
+        never reaches here — :meth:`apply_ordered` raises on it before flushing.
+        """
+        target_table = t.target_name(self.preserve_case)
+        cols = [c.name for c in t.columns]
+        key_cols = [self._ident(c) for c in t.primary_key.columns]
+        pk = list(t.primary_key.columns)
+        if kind == "delete":
+            keys = [[r.key.get(c) for c in pk] for r in run]
+            return self.target.delete_keys(target_table, key_cols, keys)
+        if kind == "full":
+            full_idents = [self._ident(c) for c in cols]
+            rows = [[r.after.get(c) for c in cols] for r in run]
+            return self.target.upsert(target_table, key_cols, full_idents, rows)
+        # partial (TOAST-omitting) update; keymove is filtered out by the caller.
+        return self._apply_partial(target_table, key_cols, pk, cols, run)
 
     def _apply_partial(
         self,

@@ -199,15 +199,19 @@ this is the short version.
 
 These are documented properties of the current spine, not bugs — design for them:
 
-- **No transaction boundaries yet.** The trail is a flat per-row stream, so a
-  source transaction that re-keys a parent row *and* re-points its children can
-  arrive with the child re-points *after* the parent-key change. A target that
-  enforces foreign keys **immediately** can reject the parent-key UPDATE. If your
-  workload re-keys parent rows and your target enforces FKs, run the apply window
-  with **deferred constraints** (`SET CONSTRAINTS ALL DEFERRED`, or declare the FKs
-  `DEFERRABLE INITIALLY DEFERRED`) or drop/disable the FK for the CDC window and
-  re-validate. Targets that don't enforce FKs are unaffected. (Full detail:
-  [FK ordering across a re-keyed parent](../cdc.md#residual-limitation-fk-ordering-across-a-re-keyed-parent).)
+- **Per-transaction atomic apply, except a re-keyed parent.** Log-based capture
+  now tags records with their source transaction (`txn_id`), and on a target that
+  proves transactional atomicity the replicat applies each **keymove-free** source
+  transaction in one `BEGIN`/`COMMIT` (`[cdc] txn_apply`, default `auto`) — so
+  cross-table insert/delete order and child re-points that follow a non-key parent
+  change land atomically. The one case still on the per-record path is a transaction
+  that **re-keys a parent row** (a primary-key move): it applies via the keymove
+  barrier, so an **immediately**-checking FK can still reject the parent-key UPDATE.
+  If your workload re-keys parent rows and your target enforces FKs, run the apply
+  window with **deferred constraints** (`SET CONSTRAINTS ALL DEFERRED`, or declare
+  the FKs `DEFERRABLE INITIALLY DEFERRED`) or drop/disable the FK for the CDC window
+  and re-validate. Targets that don't enforce FKs are unaffected. (Full detail:
+  [FK ordering](../cdc.md#fk-ordering-per-source-transaction-atomic-apply).)
 - **Delete propagation is mode-aware.** Log-based sources (MySQL binlog,
   PostgreSQL logical) carry explicit `D` events, so reconcile is **off** by
   default. The Oracle **SCN-watermark** scan can't *see* deletes, so `replicat`
