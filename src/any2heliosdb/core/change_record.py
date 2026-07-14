@@ -10,7 +10,14 @@ old-key row.
 
 Oracle hands back ``Decimal``, ``datetime``, and ``bytes`` (LOB/RAW) values that
 plain JSON cannot round-trip, so values are tagged on encode and rebuilt on
-decode, preserving the exact type the target driver needs to bind.
+decode, preserving the exact type the target driver needs to bind. A tz-aware
+``datetime`` (a ``timestamptz`` instant) is normalized to UTC on encode so a
+replicat applying to a target in another session timezone reconstructs the same
+instant; a naive ``datetime`` (a plain zone-less ``TIMESTAMP`` wall time) is left
+untouched. The log-based sources also surface ``dict``/``list`` (a MySQL binlog
+JSON column) and ``set`` (a SET column); those are serialized as JSON text / a
+comma-joined SET literal — never a Python ``repr`` — so the applied value is valid
+on the target.
 """
 from __future__ import annotations
 
@@ -63,9 +70,29 @@ def _encode(v: object) -> object:
     if isinstance(v, (bytes, bytearray, memoryview)):
         return {"__t__": "b64", "v": base64.b64encode(bytes(v)).decode("ascii")}
     if isinstance(v, _dt.datetime):
+        # timestamptz fidelity: a tz-AWARE datetime is an instant, so normalize it to
+        # a canonical UTC offset on encode — a target opened in a different session
+        # timezone then reconstructs the SAME instant rather than a shifted wall time.
+        # A NAIVE datetime (a plain zone-less TIMESTAMP) is a wall-clock reading with
+        # no instant to anchor, so it is stored exactly as-is. ``fromisoformat``
+        # rebuilds the aware value straight from the stored ``+00:00`` offset; pre-fix
+        # trail lines (source-session local wall time, carrying their own offset) keep
+        # that offset and decode byte-for-byte as before — no wire break.
+        if v.tzinfo is not None:
+            v = v.astimezone(_dt.timezone.utc)
         return {"__t__": "ts", "v": v.isoformat()}
     if isinstance(v, _dt.date):
         return {"__t__": "d", "v": v.isoformat()}
+    # A MySQL binlog JSON column yields a dict/list; a SET column yields a set. The
+    # plain ``str()`` fallback would emit a Python repr (single-quoted keys, ``{...}``
+    # braces, ``{1, 2}`` set syntax) that the target stores as garbage text. Render
+    # them the way the target actually expects instead: a JSON column maps to
+    # JSONB/json, so emit compact, key-sorted JSON text; a SET maps to TEXT, so emit
+    # the comma-joined MySQL SET literal. Sorting makes both deterministic across runs.
+    if isinstance(v, (dict, list)):
+        return {"__t__": "json", "v": json.dumps(v, separators=(",", ":"), sort_keys=True)}
+    if isinstance(v, (set, frozenset)):
+        return {"__t__": "set", "v": ",".join(sorted(str(x) for x in v))}
     return {"__t__": "str", "v": str(v)}
 
 
@@ -81,6 +108,10 @@ def _decode(v: object) -> object:
         return _dt.datetime.fromisoformat(raw)
     if t == "d":
         return _dt.date.fromisoformat(raw)
+    # ``json`` (MySQL JSON) and ``set`` (MySQL SET) decode to their stored TEXT: the
+    # target column is JSONB/json (binds the JSON text) or TEXT (binds the SET
+    # literal), so the string IS exactly what the apply must bind — no re-parsing.
+    # Unknown/future tags and the ``str`` tag also fall through to the raw string.
     return raw
 
 

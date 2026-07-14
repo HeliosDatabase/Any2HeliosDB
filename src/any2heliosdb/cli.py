@@ -188,7 +188,7 @@ def export(
 def migrate(config: str = CONFIG_OPT) -> None:
     """Run a full schema+data migration end to end (the primary command)."""
     from .config.store import (build_source_adapter, build_target_driver,
-                               build_type_registry, load_config)
+                               build_type_registry, connect_both, load_config)
     from .core.orchestrator import migrate as run_migrate
 
     from .core.loader import ResumeDriftError
@@ -196,8 +196,7 @@ def migrate(config: str = CONFIG_OPT) -> None:
     cfg = load_config(config)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect()
-    tgt.connect()
+    connect_both(src, tgt)
     try:
         manifest_path, run_id = _run_context(cfg)
         try:
@@ -239,15 +238,14 @@ def load(config: str = CONFIG_OPT) -> None:
 @app.command(name="test")
 def test_(config: str = CONFIG_OPT) -> None:
     """TEST: object-inventory diff (source vs target)."""
-    from .config.store import build_source_adapter, build_target_driver, load_config
+    from .config.store import build_source_adapter, build_target_driver, connect_both, load_config
     from .validate.structure import run_test
     from .validate.util import effective_preserve_case
 
     cfg = load_config(config)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect()
-    tgt.connect()
+    connect_both(src, tgt)
     try:
         res = run_test(src.introspect_schema(cfg.source.schema), tgt,
                        effective_preserve_case(cfg, tgt))
@@ -261,15 +259,14 @@ def test_(config: str = CONFIG_OPT) -> None:
 @app.command(name="test-count")
 def test_count(config: str = CONFIG_OPT) -> None:
     """TEST_COUNT: row counts on both sides."""
-    from .config.store import build_source_adapter, build_target_driver, load_config
+    from .config.store import build_source_adapter, build_target_driver, connect_both, load_config
     from .validate.counts import run_test_count
     from .validate.util import effective_preserve_case
 
     cfg = load_config(config)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect()
-    tgt.connect()
+    connect_both(src, tgt)
     try:
         schema = src.introspect_schema(cfg.source.schema)
         res = run_test_count(src, tgt, schema.tables, effective_preserve_case(cfg, tgt))
@@ -286,19 +283,20 @@ def test_data(
     sample: int = typer.Option(1000, "--sample", help="Rows per table to compare (0 = all)."),
 ) -> None:
     """TEST_DATA: ordered, sampled row comparison + checksums."""
-    from .config.store import build_source_adapter, build_target_driver, load_config
+    from .config.store import build_source_adapter, build_target_driver, connect_both, load_config
     from .validate.data import run_test_data
     from .validate.util import effective_preserve_case
 
     cfg = load_config(config)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect()
-    tgt.connect()
+    connect_both(src, tgt)
     failed = False
     try:
         for t in src.introspect_schema(cfg.source.schema).tables:
             res = run_test_data(src, tgt, t, sample_rows=sample,
+                                max_errors=cfg.options.test_data_max_errors,
+                                batch_size=cfg.options.batch_size,
                                 preserve_case=effective_preserve_case(cfg, tgt))
             _print_validation(res)
             failed = failed or not res.passed
@@ -311,15 +309,14 @@ def test_data(
 @app.command()
 def test_index(config: str = CONFIG_OPT) -> None:
     """TEST_INDEX: target-side FK-index sanity (catches a stale/unbackfilled FK index)."""
-    from .config.store import build_source_adapter, build_target_driver, load_config
+    from .config.store import build_source_adapter, build_target_driver, connect_both, load_config
     from .validate.data import run_test_index
     from .validate.util import effective_preserve_case
 
     cfg = load_config(config)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect()
-    tgt.connect()
+    connect_both(src, tgt)
     failed = False
     try:
         # The source schema supplies the FK metadata; the probe runs on the target.
@@ -536,7 +533,7 @@ def monitor(
 def resume(config: str = CONFIG_OPT) -> None:
     """Resume an interrupted migration run from its manifest (continues the data load)."""
     from .config.store import (build_source_adapter, build_target_driver,
-                               build_type_registry, load_config)
+                               build_type_registry, connect_both, load_config)
     from .core.orchestrator import migrate as run_migrate
 
     cfg = load_config(config)
@@ -547,8 +544,7 @@ def resume(config: str = CONFIG_OPT) -> None:
 
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect()
-    tgt.connect()
+    connect_both(src, tgt)
     try:
         try:
             stats = run_migrate(

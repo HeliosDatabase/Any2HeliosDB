@@ -283,8 +283,17 @@ def run_extract(cfg, name: str, refresh_tables: bool = False) -> Dict[str, objec
 
     cap_batch = cfg.cdc.capture_batch
     reg = CdcRegistry(_registry_path(cfg))
-    adapter = build_source_adapter(cfg)
-    adapter.connect()
+    try:
+        # The registry (a SQLite connection) is already open; close it if building
+        # OR connecting the source fails, before the try/finally that would close
+        # both is entered — otherwise a failed extract leaks the registry handle.
+        # Covers a builder failure (e.g. a missing optional driver import) too, not
+        # just the connect.
+        adapter = build_source_adapter(cfg)
+        adapter.connect()
+    except BaseException:
+        reg.close()
+        raise
     try:
         schema_ir = adapter.introspect_schema(cfg.source.schema)
         schema_name = cfg.source.schema or schema_ir.name
@@ -543,7 +552,7 @@ def _default_reconcile_deletes(cfg) -> bool:
 
 
 def run_replicat(cfg, name: str, reconcile_deletes: Optional[bool] = None) -> Dict[str, object]:
-    from ..config.store import build_source_adapter, build_target_driver
+    from ..config.store import build_source_adapter, build_target_driver, connect_both
     from ..constants import Edition
 
     # ``None`` means "no explicit --reconcile-deletes/--no-deletes": pick the
@@ -559,11 +568,13 @@ def run_replicat(cfg, name: str, reconcile_deletes: Optional[bool] = None) -> Di
         if ext is None:
             raise Any2HeliosError("no such extract '{}'; run `a2h extract {}` first".format(name, name))
         # Keep the source open: it supplies the apply-side schema (PKs/columns) and,
-        # for delete reconciliation, the current key set.
+        # for delete reconciliation, the current key set. Connect source then target;
+        # if the target connect fails, the already-open source is closed before we
+        # propagate (a long-running server otherwise leaks a source socket per failed
+        # replicat — the inner try/finally that closes both is not entered yet).
         adapter = build_source_adapter(cfg)
-        adapter.connect()
         target = build_target_driver(cfg)
-        target.connect()
+        connect_both(adapter, target)
         try:
             # Gate the apply on a live capability probe: refuse editions whose
             # keyed upsert can't run, with a clear message instead of a cryptic

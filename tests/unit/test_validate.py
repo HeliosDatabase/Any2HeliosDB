@@ -278,6 +278,83 @@ def test_run_test_data_no_pk_flags_difference():
     assert any(e.severity is Severity.BLOCKER for e in res.errors)
 
 
+def _str_pk_table() -> Table:
+    return Table(
+        name="ACCT", schema="HR",
+        columns=[Column("CODE", DataType.varchar(20)), Column("V", DataType.varchar(50))],
+        primary_key=PrimaryKey(columns=["CODE"]),
+    )
+
+
+# --- F3: collation-stable ordering (string PK) ------------------------------
+def test_run_test_data_string_pk_collation_does_not_false_fail():
+    # Source streams in one order; the target's ORDER BY returns a different
+    # (case-folding) order of the SAME rows. A byte-canonical re-sort on both sides
+    # aligns them, so no false mismatch (the pre-fix position-by-position compare
+    # would have flagged every row).
+    src = FakeSource(rows={"ACCT": [("Apple", "x"), ("apple", "y"), ("Banana", "z")]})
+    tgt = FakeTarget(select_rows={"acct": [("apple", "y"), ("Apple", "x"), ("Banana", "z")]})
+    res = run_test_data(src, tgt, _str_pk_table())
+    assert res.passed is True
+    assert res.metrics["mismatches"] == 0
+    assert res.metrics["rows_compared"] == 3
+
+
+def test_run_test_data_string_pk_detects_real_value_mismatch():
+    # Same collation reshuffle, but the "apple" row's value genuinely differs — the
+    # canonical alignment must still catch it.
+    src = FakeSource(rows={"ACCT": [("Apple", "x"), ("apple", "y")]})
+    tgt = FakeTarget(select_rows={"acct": [("apple", "Y"), ("Apple", "x")]})  # "apple" value differs
+    res = run_test_data(src, tgt, _str_pk_table())
+    assert res.passed is False
+    assert res.metrics["mismatches"] == 1
+
+
+def test_run_test_data_reports_interior_missing_key_without_cascade():
+    # id=2 is missing on the target. A key-aware merge flags exactly that key, not a
+    # cascade of position-shifted checksum mismatches.
+    src = FakeSource(rows={"EMP": [(1, "a"), (2, "b"), (3, "c")]})
+    tgt = FakeTarget(select_rows={"emp": [(1, "a"), (3, "c")]})
+    res = run_test_data(src, tgt, _emp_table())
+    assert res.passed is False
+    assert res.metrics["mismatches"] == 1
+    assert any("missing from target" in e.message for e in res.errors)
+    assert any("row count differs" in e.message for e in res.errors)
+
+
+def test_run_test_data_stops_after_max_errors():
+    src = FakeSource(rows={"EMP": [(1, "a"), (2, "b"), (3, "c"), (4, "d")]})
+    tgt = FakeTarget(select_rows={"emp": [(1, "A"), (2, "B"), (3, "C"), (4, "D")]})  # all differ
+    res = run_test_data(src, tgt, _emp_table(), max_errors=2)
+    assert res.metrics["mismatches"] == 2
+    assert res.metrics.get("stopped_early") is True
+
+
+# --- F3: bounded source streaming (no whole-table materialization) ----------
+def test_source_rows_bounds_memory_to_sample_via_heap():
+    from any2heliosdb.validate.data import _source_rows
+
+    rows = [(i, "v{}".format(i)) for i in range(999, -1, -1)]  # reverse PK order
+    captured = {}
+
+    class _CountingSource:
+        def stream_rows(self, table, columns, where=None, arraysize=1000):
+            captured["arraysize"] = arraysize
+            for r in rows:
+                yield r
+
+    got = _source_rows(_CountingSource(), _emp_table(), ["ID", "NAME"], ["ID"], 5, batch_size=250)
+    assert [r[0] for r in got] == [0, 1, 2, 3, 4]   # the 5 smallest by PK, not a full sort+slice
+    assert captured["arraysize"] == 250             # batch_size threaded as the server-side fetch
+
+
+def test_pk_sort_key_uses_byte_order_for_strings():
+    from any2heliosdb.validate.data import _pk_sort_key
+
+    # 'B' (0x42) sorts before 'a' (0x61) in byte order regardless of DB collation.
+    assert _pk_sort_key(("Banana",), [0]) < _pk_sort_key(("apple",), [0])
+
+
 def test_render_datetime_normalizes_tz_to_utc_instant():
     import datetime as dt
 

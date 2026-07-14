@@ -288,15 +288,14 @@ def _h_validate_config(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _h_test(args: Dict[str, Any]) -> Dict[str, Any]:
-    from ..config.store import build_source_adapter, build_target_driver
+    from ..config.store import build_source_adapter, build_target_driver, connect_both
     from ..validate.structure import run_test
     from ..validate.util import effective_preserve_case
 
     cfg = _load_cfg(args)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect()
-    tgt.connect()
+    connect_both(src, tgt)
     try:
         res = run_test(src.introspect_schema(cfg.source.schema), tgt,
                        effective_preserve_case(cfg, tgt))
@@ -307,15 +306,14 @@ def _h_test(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _h_test_count(args: Dict[str, Any]) -> Dict[str, Any]:
-    from ..config.store import build_source_adapter, build_target_driver
+    from ..config.store import build_source_adapter, build_target_driver, connect_both
     from ..validate.counts import run_test_count
     from ..validate.util import effective_preserve_case
 
     cfg = _load_cfg(args)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect()
-    tgt.connect()
+    connect_both(src, tgt)
     try:
         schema = src.introspect_schema(cfg.source.schema)
         res = run_test_count(src, tgt, schema.tables, effective_preserve_case(cfg, tgt))
@@ -326,7 +324,7 @@ def _h_test_count(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _h_test_data(args: Dict[str, Any]) -> Dict[str, Any]:
-    from ..config.store import build_source_adapter, build_target_driver
+    from ..config.store import build_source_adapter, build_target_driver, connect_both
     from ..validate.data import run_test_data
     from ..validate.util import effective_preserve_case
 
@@ -334,14 +332,15 @@ def _h_test_data(args: Dict[str, Any]) -> Dict[str, Any]:
     sample = int(args.get("sample", 1000))
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect()
-    tgt.connect()
+    connect_both(src, tgt)
     results = []
     passed = True
     try:
         pc = effective_preserve_case(cfg, tgt)
         for t in src.introspect_schema(cfg.source.schema).tables:
             res = run_test_data(src, tgt, t, sample_rows=sample,
+                                max_errors=cfg.options.test_data_max_errors,
+                                batch_size=cfg.options.batch_size,
                                 preserve_case=pc)
             results.append(_validation_to_dict(res))
             passed = passed and res.passed
@@ -352,15 +351,14 @@ def _h_test_data(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _h_test_index(args: Dict[str, Any]) -> Dict[str, Any]:
-    from ..config.store import build_source_adapter, build_target_driver
+    from ..config.store import build_source_adapter, build_target_driver, connect_both
     from ..validate.data import run_test_index
     from ..validate.util import effective_preserve_case
 
     cfg = _load_cfg(args)
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect()
-    tgt.connect()
+    connect_both(src, tgt)
     results = []
     passed = True
     try:
@@ -398,7 +396,7 @@ def _h_export(args: Dict[str, Any]) -> Dict[str, Any]:
 # Operator (write) ------------------------------------------------------------
 def _h_migrate(args: Dict[str, Any]) -> Dict[str, Any]:
     from ..config.store import (build_source_adapter, build_target_driver,
-                                build_type_registry)
+                                build_type_registry, connect_both)
     from ..core.orchestrator import migrate as run_migrate
 
     cfg = _load_cfg(args)
@@ -410,8 +408,7 @@ def _h_migrate(args: Dict[str, Any]) -> Dict[str, Any]:
         cfg.options.drop_existing = bool(args["drop_existing"])
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect()
-    tgt.connect()
+    connect_both(src, tgt)
     try:
         manifest_path, run_id = _run_context(cfg)
         stats = run_migrate(
@@ -432,7 +429,7 @@ def _h_migrate(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def _h_resume(args: Dict[str, Any]) -> Dict[str, Any]:
     from ..config.store import (build_source_adapter, build_target_driver,
-                                build_type_registry)
+                                build_type_registry, connect_both)
     from ..core.orchestrator import migrate as run_migrate
 
     cfg = _load_cfg(args)
@@ -441,8 +438,7 @@ def _h_resume(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "error": "no manifest to resume at {}".format(manifest_path)}
     src = build_source_adapter(cfg)
     tgt = build_target_driver(cfg)
-    src.connect()
-    tgt.connect()
+    connect_both(src, tgt)
     try:
         stats = run_migrate(
             src, tgt, schema=cfg.source.schema, registry=build_type_registry(cfg),
